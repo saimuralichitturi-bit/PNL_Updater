@@ -8,8 +8,7 @@ import hashlib
 import base64
 import requests
 from urllib.parse import unquote
-from bs4 import BeautifulSoup
-   
+from bs4 import BeautifulSoup   
 SESSION_FILE       = "tradetron_session.json"
 TRADETRON_EMAIL    = os.environ.get("TRADETRON_EMAIL", "")
 TRADETRON_PASSWORD = os.environ.get("TRADETRON_PASSWORD", "")

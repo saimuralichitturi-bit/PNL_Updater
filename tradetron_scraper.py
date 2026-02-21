@@ -38,89 +38,79 @@ session = requests.Session()
 session.cookies.update(cookies)
 
 BASE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept":     "application/json, text/plain, */*",
-    "Origin":     "https://tradetron.tech",
-    "Referer":    "https://tradetron.tech/dashboard",
-    "X-Requested-With": "XMLHttpRequest",
+    "User-Agent":        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Accept":            "application/json, text/plain, */*",
+    "Origin":            "https://tradetron.tech",
+    "Referer":           "https://tradetron.tech/user/dashboard",
+    "X-Requested-With":  "XMLHttpRequest",
 }
 if token:
     BASE_HEADERS["Authorization"] = f"Bearer {token}"
 if xsrf:
     BASE_HEADERS["X-XSRF-TOKEN"] = xsrf
 
-# ── Strategy endpoints to try (in order) ──────────────────────────────────────
-ENDPOINTS = [
-    "https://tradetron.tech/api/strategy/deployed",
-    "https://tradetron.tech/api/deployed-strategies",
-    "https://tradetron.tech/api/strategy/my-strategies",
-    "https://tradetron.tech/api/strategies",
-    "https://tradetron.tech/api/user/strategies",
-    "https://tradetron.tech/api/strategy/list",
-]
+# ── API endpoint ───────────────────────────────────────────────────────────────
+API_URL = "https://tradetron.tech/api/deployed-strategies"
 
-def try_fetch(url: str):
-    """GET a URL and return parsed list of strategies, or None on failure."""
-    try:
-        resp = session.get(url, headers=BASE_HEADERS, timeout=30)
-        print(f"[Scraper] {url} → {resp.status_code}")
-        if resp.status_code == 200:
-            data = resp.json()
-            # Handle various response shapes
-            if isinstance(data, list):
-                return data
-            for key in ("data", "strategies", "result", "results", "items"):
-                if isinstance(data.get(key), list):
-                    return data[key]
-            # If it's a dict with strategy-like keys, wrap it
-            if isinstance(data, dict) and ("id" in data or "name" in data):
-                return [data]
-        else:
-            print(f"[Scraper]   Response snippet: {resp.text[:150]}")
-    except Exception as e:
-        print(f"[Scraper]   Error: {e}")
-    return None
 
+# ── Fetch strategies ───────────────────────────────────────────────────────────
 def fetch_strategies():
-    for url in ENDPOINTS:
-        result = try_fetch(url)
-        if result is not None and len(result) > 0:
-            print(f"[Scraper] ✓ Got {len(result)} strategies from {url}")
-            return result
-        elif result is not None:
-            print(f"[Scraper]   Empty list returned from {url}, trying next...")
+    print(f"[Scraper] Fetching → {API_URL}")
+    resp = session.get(API_URL, headers=BASE_HEADERS, timeout=30)
+    print(f"[Scraper] Status: {resp.status_code}")
 
-    raise RuntimeError(
-        "[Scraper] All endpoints returned 401/404/empty.\n"
-        "Check tradetron_auth.py logs — the session token/cookies may not be valid.\n"
-        "Tradetron may require a different login flow."
-    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"[Scraper] API returned {resp.status_code}: {resp.text[:200]}")
 
+    data = resp.json()
+
+    # Response shape: {"success": true, "data": [...], "paginate": {...}}
+    strategies = data.get("data")
+    if not isinstance(strategies, list):
+        raise RuntimeError(f"[Scraper] Unexpected response shape. Keys: {list(data.keys())}")
+
+    print(f"[Scraper] ✓ Got {len(strategies)} strategies")
+    return strategies
+
+
+# ── Parse a single strategy dict into a flat CSV row ──────────────────────────
 def parse_strategy(s: dict) -> dict:
-    """Flatten a raw strategy dict into a clean CSV row."""
-    # Handle nested pnl objects
-    pnl_obj   = s.get("pnl") or {}
-    today_pnl = (
-        s.get("todayPnl") or s.get("today_pnl")
-        or (pnl_obj.get("today") if isinstance(pnl_obj, dict) else None)
-        or s.get("pnl") if not isinstance(s.get("pnl"), dict) else 0
-    ) or 0
-    overall_pnl = (
-        s.get("overallPnl") or s.get("overall_pnl") or s.get("totalPnl")
-        or (pnl_obj.get("overall") or pnl_obj.get("total") if isinstance(pnl_obj, dict) else None)
-    ) or 0
+    """Map actual API fields to clean CSV columns."""
+
+    template        = s.get("template") or {}
+    strategy_broker = s.get("strategy_broker") or {}
+    broker          = strategy_broker.get("broker") or {}
+
+    # ── PNL fields ────────────────────────────────────────────────────────────
+    # all_pnl  = sum of ALL historical run_counter PNLs (overall / booked)
+    # last_pnl = PNL of the most recently COMPLETED run_counter (last closed trade)
+    # globalPt = unrealised / live PNL if currently in an open position
+    all_pnl  = s.get("all_pnl")  or 0
+    last_pnl = s.get("last_pnl") or 0
+    live_pnl = s.get("globalPt") or 0
+
+    # ── Run counter info ───────────────────────────────────────────────────────
+    current_run = s.get("run_counter")     or 0
+    max_run     = s.get("max_run_counter") or 0
 
     return {
-        "Strategy ID":   s.get("id")        or s.get("strategy_id") or s.get("_id", ""),
-        "Strategy Name": s.get("name")       or s.get("strategy_name") or s.get("title", ""),
-        "Status":        s.get("status")     or s.get("state") or s.get("deployStatus", ""),
-        "PNL (Today)":   today_pnl,
-        "PNL (Overall)": overall_pnl,
-        "Capital":       s.get("capital")    or s.get("investment") or s.get("allocatedCapital", 0),
-        "Broker":        s.get("broker")     or s.get("broker_name") or s.get("brokerName", ""),
-        "Instrument":    s.get("instrument") or s.get("underlying")  or s.get("symbol", ""),
-        "Last Updated":  s.get("updatedAt")  or s.get("updated_at")  or s.get("lastUpdated", ""),
+        "Strategy ID":      s.get("id", ""),
+        "Strategy Name":    template.get("name", ""),
+        "Status":           s.get("status", ""),
+        "Deployment Type":  s.get("deployment_type", ""),
+        "Exchange":         s.get("exchange", "") or strategy_broker.get("exchange", ""),
+        "Broker":           broker.get("name", ""),
+        "Capital Required": template.get("capital_required", 0),
+        "PNL (Last Run)":   round(last_pnl, 2),
+        "PNL (Overall)":    round(all_pnl, 2),
+        "PNL (Live/Open)":  round(live_pnl, 2),
+        "Run Counter":      current_run,
+        "Completed Runs":   max_run,
+        "Currency":         s.get("currency_code", "INR"),
+        "Deployment Date":  s.get("deployment_date", "")[:10] if s.get("deployment_date") else "",
+        "Creator":          (template.get("user") or {}).get("name", ""),
     }
+
 
 # ── Fetch & build DataFrame ────────────────────────────────────────────────────
 raw_strategies = fetch_strategies()
@@ -136,15 +126,30 @@ df = pd.DataFrame(rows)
 df["Snapshot Time"] = timestamp_str
 df.sort_values("Strategy Name", inplace=True, ignore_index=True)
 
+# ── Write output files ─────────────────────────────────────────────────────────
 df.to_csv(SNAPSHOT_CSV, index=False)
 df.to_csv(LATEST_CSV,   index=False)
 
 with open(SNAPSHOT_PTR_FILE, "w") as f:
     f.write(SNAPSHOT_CSV)
 
+# ── Summary ────────────────────────────────────────────────────────────────────
+total_overall = df["PNL (Overall)"].sum()
+total_last    = df["PNL (Last Run)"].sum()
+total_live    = df["PNL (Live/Open)"].sum()
+
 print(f"\n[Scraper] Files written:")
 print(f"  {SNAPSHOT_CSV:<38} ← timestamped snapshot")
 print(f"  {LATEST_CSV:<38} ← latest copy")
 print(f"  {SNAPSHOT_PTR_FILE:<38} ← pointer for uploader")
+
 print(f"\n[Scraper] Preview:")
-print(df[["Strategy Name", "PNL (Today)", "PNL (Overall)", "Status"]].to_string())
+print(df[[
+    "Strategy Name", "Status", "Broker",
+    "PNL (Last Run)", "PNL (Overall)", "PNL (Live/Open)", "Run Counter"
+]].to_string())
+
+print(f"\n[Scraper] ── TOTALS ──────────────────────────────────────")
+print(f"  Overall PNL  (all strategies) : ₹{total_overall:>12,.2f}")
+print(f"  Last Run PNL (all strategies) : ₹{total_last:>12,.2f}")
+print(f"  Live PNL     (all strategies) : ₹{total_live:>12,.2f}")
