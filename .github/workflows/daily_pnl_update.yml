@@ -29,22 +29,22 @@ jobs:
         env:
           TRADETRON_EMAIL:    ${{ secrets.TRADETRON_EMAIL }}
           TRADETRON_PASSWORD: ${{ secrets.TRADETRON_PASSWORD }}
-        run: python scripts/tradetron_auth.py
+        run: python tradetron_auth.py
 
       # ── Step 2: Scrape strategies + PNL ─────────────────────────────────────
       # Reads:   tradetron_session.json
       # Writes:  pnl_YYYY-MM-DD_HH-MM.csv, pnl_latest.csv, snapshot_path.txt
       - name: "Step 2 — Scrape strategies & PNL, save to CSV"
-        run: python scripts/tradetron_scraper.py
+        run: python tradetron_scraper.py
 
       # ── Step 3: Upload CSVs to Google Drive ─────────────────────────────────
-      # Reads:   snapshot_path.txt, pnl_*.csv  (both CSVs)
+      # Reads:   snapshot_path.txt, pnl_*.csv
       # Uploads: to GOOGLE_DRIVE_FOLDER_ID
       - name: "Step 3 — Upload CSV files to Google Drive"
         env:
           GOOGLE_DRIVE_FOLDER_ID:  ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-        run: python scripts/google_drive_uploader.py
+        run: python google_drive_uploader.py
 
       - name: Done
         run: echo "✅ PNL update complete — $(date '+%Y-%m-%d %H:%M:%S UTC')"
