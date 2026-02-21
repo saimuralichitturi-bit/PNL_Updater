@@ -1,0 +1,6 @@
+# Streamlit dashboard dependencies (dashboard.py)
+streamlit==1.33.0
+pandas==2.2.1
+pytz==2024.1
+google-auth==2.29.0
+google-api-python-client==2.124.0
