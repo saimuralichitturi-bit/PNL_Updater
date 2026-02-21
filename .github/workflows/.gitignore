@@ -1,0 +1,4 @@
+# .gitignore
+tradetron_session.json
+pnl_*.csv
+snapshot_path.txt

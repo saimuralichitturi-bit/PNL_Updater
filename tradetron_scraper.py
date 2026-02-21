@@ -3,8 +3,9 @@ tradetron_scraper.py
 ────────────────────
 Scrapes all Tradetron strategies + PNL using the saved session.
 
-INPUT FILE:
-  tradetron_session.json       ←  written by tradetron_auth.py
+SESSION SOURCE (in order of priority):
+  1. TRADETRON_SESSION env var  ← injected by GitHub Actions from auth step output
+  2. tradetron_session.json     ← fallback for local testing
 
 OUTPUT FILES:
   pnl_YYYY-MM-DD_HH-MM.csv    ←  timestamped snapshot
@@ -12,6 +13,7 @@ OUTPUT FILES:
   snapshot_path.txt            ←  filename pointer for google_drive_uploader.py
 """
 
+import os
 import json
 import requests
 import pandas as pd
@@ -23,9 +25,16 @@ SESSION_FILE      = "tradetron_session.json"
 SNAPSHOT_PTR_FILE = "snapshot_path.txt"
 LATEST_CSV        = "pnl_latest.csv"
 
-# ── Load session ───────────────────────────────────────────────────────────────
-with open(SESSION_FILE) as f:
-    session_data = json.load(f)
+# ── Load session — env var first, then file fallback ──────────────────────────
+session_json_str = os.environ.get("TRADETRON_SESSION", "")
+
+if session_json_str:
+    print("[Scraper] Loading session from TRADETRON_SESSION env var")
+    session_data = json.loads(session_json_str)
+else:
+    print(f"[Scraper] Loading session from {SESSION_FILE}")
+    with open(SESSION_FILE) as f:
+        session_data = json.load(f)
 
 cookies = session_data.get("cookies", {})
 token   = session_data.get("token")
@@ -75,21 +84,14 @@ def fetch_strategies():
 
 # ── Parse a single strategy dict into a flat CSV row ──────────────────────────
 def parse_strategy(s: dict) -> dict:
-    """Map actual API fields to clean CSV columns."""
-
     template        = s.get("template") or {}
     strategy_broker = s.get("strategy_broker") or {}
     broker          = strategy_broker.get("broker") or {}
 
-    # ── PNL fields ────────────────────────────────────────────────────────────
-    # all_pnl  = sum of ALL historical run_counter PNLs (overall / booked)
-    # last_pnl = PNL of the most recently COMPLETED run_counter (last closed trade)
-    # globalPt = unrealised / live PNL if currently in an open position
     all_pnl  = s.get("all_pnl")  or 0
     last_pnl = s.get("last_pnl") or 0
     live_pnl = s.get("globalPt") or 0
 
-    # ── Run counter info ───────────────────────────────────────────────────────
     current_run = s.get("run_counter")     or 0
     max_run     = s.get("max_run_counter") or 0
 
