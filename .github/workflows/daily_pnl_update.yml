@@ -1,0 +1,50 @@
+name: Daily Tradetron PNL Update
+
+on:
+  schedule:
+    # 3:16 PM IST = 9:46 AM UTC (IST is UTC+5:30) — runs Mon–Fri (trading days)
+    - cron: "46 9 * * 1-5"
+  workflow_dispatch:   # allows manual trigger from GitHub Actions tab
+
+jobs:
+  update-pnl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Step 1: Login & save session ────────────────────────────────────────
+      # Reads:   TRADETRON_EMAIL, TRADETRON_PASSWORD  (GitHub Secrets)
+      # Writes:  tradetron_session.json
+      - name: "Step 1 — Authenticate with Tradetron"
+        env:
+          TRADETRON_EMAIL:    ${{ secrets.TRADETRON_EMAIL }}
+          TRADETRON_PASSWORD: ${{ secrets.TRADETRON_PASSWORD }}
+        run: python scripts/tradetron_auth.py
+
+      # ── Step 2: Scrape strategies + PNL ─────────────────────────────────────
+      # Reads:   tradetron_session.json
+      # Writes:  pnl_YYYY-MM-DD_HH-MM.csv, pnl_latest.csv, snapshot_path.txt
+      - name: "Step 2 — Scrape strategies & PNL, save to CSV"
+        run: python scripts/tradetron_scraper.py
+
+      # ── Step 3: Upload CSVs to Google Drive ─────────────────────────────────
+      # Reads:   snapshot_path.txt, pnl_*.csv  (both CSVs)
+      # Uploads: to GOOGLE_DRIVE_FOLDER_ID
+      - name: "Step 3 — Upload CSV files to Google Drive"
+        env:
+          GOOGLE_DRIVE_FOLDER_ID:  ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: python scripts/google_drive_uploader.py
+
+      - name: Done
+        run: echo "✅ PNL update complete — $(date '+%Y-%m-%d %H:%M:%S UTC')"
