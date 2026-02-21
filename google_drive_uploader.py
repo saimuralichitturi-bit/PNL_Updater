@@ -54,18 +54,20 @@ def upload_to_drive(local_path: str, drive_filename: str, overwrite: bool = Fals
     if overwrite:
         existing = drive.files().list(
             q=f"name='{drive_filename}' and '{FOLDER_ID}' in parents and trashed=false",
-            fields="files(id, name)"
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
         ).execute().get("files", [])
 
         if existing:
             file_id = existing[0]["id"]
-            result  = drive.files().update(fileId=file_id, media_body=media).execute()
+            result  = drive.files().update(fileId=file_id, media_body=media,supportsAllDrives=True).execute()
             print(f"[Uploader] ✓ Updated  '{drive_filename}'  (Drive ID: {result['id']})")
             return result["id"]
 
     # Create brand new file
     metadata = {"name": drive_filename, "parents": [FOLDER_ID]}
-    result   = drive.files().create(body=metadata, media_body=media, fields="id").execute()
+    result   = drive.files().create(body=metadata, media_body=media, fields="id",supportsAllDrives=True).execute()
     print(f"[Uploader] ✓ Uploaded '{drive_filename}'  (Drive ID: {result['id']})")
     return result["id"]
 
