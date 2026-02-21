@@ -4,7 +4,7 @@ on:
   schedule:
     # 3:16 PM IST = 9:46 AM UTC (IST is UTC+5:30) — runs Mon–Fri (trading days)
     - cron: "46 9 * * 1-5"
-  workflow_dispatch:   # allows manual trigger from GitHub Actions tab
+  workflow_dispatch:
 
 jobs:
   update-pnl:
@@ -22,8 +22,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ── Step 1: Login & save session ────────────────────────────────────────
-      # Reads:   TRADETRON_EMAIL, TRADETRON_PASSWORD  (GitHub Secrets)
+      # ── Step 1: Login ──────────────────────────────────────────────────────
+      # Reads:   TRADETRON_EMAIL, TRADETRON_PASSWORD
       # Writes:  tradetron_session.json
       - name: "Step 1 — Authenticate with Tradetron"
         env:
@@ -31,14 +31,26 @@ jobs:
           TRADETRON_PASSWORD: ${{ secrets.TRADETRON_PASSWORD }}
         run: python tradetron_auth.py
 
-      # ── Step 2: Scrape strategies + PNL ─────────────────────────────────────
+      # ── Debug: print session (masks sensitive values) ──────────────────────
+      - name: "Debug — Show session info (no secrets)"
+        run: |
+          python - << 'EOF'
+          import json
+          with open("tradetron_session.json") as f:
+              s = json.load(f)
+          print("Cookie keys:", list(s.get("cookies", {}).keys()))
+          print("Token present:", bool(s.get("token")))
+          print("XSRF present:", bool(s.get("xsrf")))
+          EOF
+
+      # ── Step 2: Scrape ────────────────────────────────────────────────────
       # Reads:   tradetron_session.json
       # Writes:  pnl_YYYY-MM-DD_HH-MM.csv, pnl_latest.csv, snapshot_path.txt
       - name: "Step 2 — Scrape strategies & PNL, save to CSV"
         run: python tradetron_scraper.py
 
-      # ── Step 3: Upload CSVs to Google Drive ─────────────────────────────────
-      # Reads:   snapshot_path.txt, pnl_*.csv
+      # ── Step 3: Upload ────────────────────────────────────────────────────
+      # Reads:   snapshot_path.txt + CSV files
       # Uploads: to GOOGLE_DRIVE_FOLDER_ID
       - name: "Step 3 — Upload CSV files to Google Drive"
         env:
