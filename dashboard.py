@@ -6,6 +6,12 @@ Streamlit dashboard to view and download Tradetron PNL snapshots from Google Dri
 Streamlit Secrets required:
   GOOGLE_DRIVE_FOLDER_ID   = "your_folder_id"
   GOOGLE_CREDENTIALS_JSON  = '{ ...service account JSON... }'
+
+Columns from tradetron_scraper.py:
+  Strategy ID, Strategy Name, Status, Deployment Type, Exchange,
+  Broker, Capital Required, PNL (Last Run), PNL (Overall),
+  PNL (Live/Open), Run Counter, Completed Runs, Currency,
+  Deployment Date, Creator, Snapshot Time
 """
 
 import streamlit as st
@@ -72,7 +78,9 @@ def list_csv_files(drive, folder_id):
         q=f"'{folder_id}' in parents and name contains '.csv' and trashed=false",
         orderBy="createdTime desc",
         fields="files(id, name, createdTime, size)",
-        pageSize=50
+        pageSize=50,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
     ).execute()
     return results.get("files", [])
 
@@ -87,18 +95,27 @@ def download_csv(drive, file_id) -> pd.DataFrame:
     return pd.read_csv(buffer)
 
 def format_filename_as_datetime(filename: str) -> str:
-    """
-    Convert pnl_2024-05-01_15-16.csv → '01 May 2024, 03:16 PM IST'
-    Falls back gracefully if format doesn't match.
-    """
     try:
-        base   = filename.replace("pnl_", "").replace(".csv", "")  # 2024-05-01_15-16
+        base   = filename.replace("pnl_", "").replace(".csv", "")
         dt     = datetime.strptime(base, "%Y-%m-%d_%H-%M")
         ist    = pytz.timezone("Asia/Kolkata")
         dt_ist = pytz.utc.localize(dt).astimezone(ist)
         return dt_ist.strftime("%d %b %Y, %I:%M %p IST")
     except Exception:
-        return filename   # return raw name if parsing fails
+        return filename
+
+def color_pnl(val):
+    try:
+        v = float(val)
+        return f"color: {'#10b981' if v >= 0 else '#ef4444'}; font-weight: 700"
+    except Exception:
+        return ""
+
+def arrow(val):
+    return "▲" if val >= 0 else "▼"
+
+def clr(val):
+    return "positive" if val >= 0 else "negative"
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.markdown("# 📈 Tradetron PNL Dashboard")
@@ -120,7 +137,7 @@ if not all_files:
     st.warning("No CSV files found in the Drive folder. Run the GitHub Action first.")
     st.stop()
 
-latest_file   = next((f for f in all_files if f["name"] == "pnl_latest.csv"), None)
+latest_file    = next((f for f in all_files if f["name"] == "pnl_latest.csv"), None)
 snapshot_files = [f for f in all_files if f["name"] != "pnl_latest.csv"]
 
 # ── Sidebar file selector ──────────────────────────────────────────────────────
@@ -136,16 +153,43 @@ for f in snapshot_files:
 selected_label = st.sidebar.selectbox("Choose a snapshot:", list(options.keys()))
 selected_file  = options[selected_label]
 
+# ── Sidebar filters ────────────────────────────────────────────────────────────
+st.sidebar.markdown("## 🔍 Filters")
+
 # ── Load the CSV ───────────────────────────────────────────────────────────────
 with st.spinner(f"Loading {selected_file['name']}..."):
     df = download_csv(drive, selected_file["id"])
 
-# ── Snapshot timestamp row ─────────────────────────────────────────────────────
+# Ensure numeric columns are properly typed
+for col in ["PNL (Last Run)", "PNL (Overall)", "PNL (Live/Open)", "Capital Required",
+            "Run Counter", "Completed Runs"]:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+# Sidebar: Status filter
+if "Status" in df.columns:
+    all_statuses = sorted(df["Status"].dropna().unique().tolist())
+    selected_statuses = st.sidebar.multiselect(
+        "Filter by Status:", all_statuses, default=all_statuses
+    )
+    df_filtered = df[df["Status"].isin(selected_statuses)]
+else:
+    df_filtered = df
+
+# Sidebar: Broker filter
+if "Broker" in df.columns:
+    all_brokers = sorted(df_filtered["Broker"].dropna().unique().tolist())
+    selected_brokers = st.sidebar.multiselect(
+        "Filter by Broker:", all_brokers, default=all_brokers
+    )
+    df_filtered = df_filtered[df_filtered["Broker"].isin(selected_brokers)]
+
+# ── Snapshot timestamp ─────────────────────────────────────────────────────────
 snapshot_time = ""
 if "Snapshot Time" in df.columns:
-    snapshot_time = df["Snapshot Time"].iloc[0]            # from inside CSV
+    snapshot_time = df["Snapshot Time"].iloc[0]
 elif selected_file["name"] != "pnl_latest.csv":
-    snapshot_time = format_filename_as_datetime(selected_file["name"])   # from filename
+    snapshot_time = format_filename_as_datetime(selected_file["name"])
 
 col_ts, col_btn = st.columns([4, 1])
 with col_ts:
@@ -162,48 +206,67 @@ with col_btn:
 st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Summary metric cards ───────────────────────────────────────────────────────
-if "PNL (Today)" in df.columns:
-    total_today   = pd.to_numeric(df["PNL (Today)"],   errors="coerce").sum()
-    total_overall = pd.to_numeric(df["PNL (Overall)"], errors="coerce").sum()
-    total_capital = pd.to_numeric(df.get("Capital", pd.Series([0])), errors="coerce").sum()
-    active_count  = (df.get("Status", pd.Series([])).str.lower() == "running").sum()
+total_last_run  = df_filtered["PNL (Last Run)"].sum()   if "PNL (Last Run)"   in df_filtered.columns else 0
+total_overall   = df_filtered["PNL (Overall)"].sum()    if "PNL (Overall)"    in df_filtered.columns else 0
+total_live      = df_filtered["PNL (Live/Open)"].sum()  if "PNL (Live/Open)"  in df_filtered.columns else 0
+total_capital   = df_filtered["Capital Required"].sum() if "Capital Required" in df_filtered.columns else 0
+active_count    = (df_filtered["Status"].isin(["Active", "Live-Entered"])).sum() if "Status" in df_filtered.columns else 0
+total_count     = len(df_filtered)
 
-    def clr(val): return "positive" if val >= 0 else "negative"
-    def arrow(val): return "▲" if val >= 0 else "▼"
+m1, m2, m3, m4, m5 = st.columns(5)
 
-    m1, m2, m3, m4 = st.columns(4)
-    for col, label, val, fmt in [
-        (m1, "Today's PNL",     total_today,   f"{arrow(total_today)} ₹{abs(total_today):,.0f}"),
-        (m2, "Overall PNL",     total_overall, f"{arrow(total_overall)} ₹{abs(total_overall):,.0f}"),
-        (m3, "Total Capital",   total_capital, f"₹{total_capital:,.0f}"),
-        (m4, "Active Strategies", active_count, f"{active_count} / {len(df)}"),
-    ]:
-        css = clr(val) if label in ("Today's PNL", "Overall PNL") else "neutral"
-        col.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">{label}</div>
-            <div class="metric-value {css}">{fmt}</div>
-        </div>""", unsafe_allow_html=True)
+metrics = [
+    (m1, "Last Run PNL",      total_last_run,  f"{arrow(total_last_run)} ₹{abs(total_last_run):,.0f}",  True),
+    (m2, "Overall PNL",       total_overall,   f"{arrow(total_overall)} ₹{abs(total_overall):,.0f}",   True),
+    (m3, "Live / Open PNL",   total_live,      f"{arrow(total_live)} ₹{abs(total_live):,.0f}",         True),
+    (m4, "Capital Required",  total_capital,   f"₹{total_capital:,.0f}",                               False),
+    (m5, "Active Strategies", active_count,    f"{active_count} / {total_count}",                      False),
+]
 
-    st.markdown("<br>", unsafe_allow_html=True)
+for col, label, val, fmt, use_color in metrics:
+    css = clr(val) if use_color else "neutral"
+    col.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-label">{label}</div>
+        <div class="metric-value {css}">{fmt}</div>
+    </div>""", unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
 
 # ── Data table ─────────────────────────────────────────────────────────────────
 st.markdown("### 📊 Strategy-wise PNL")
 
-display_df = df.drop(columns=["Snapshot Time"], errors="ignore")
+# Column order for display
+display_cols = [
+    "Strategy Name", "Status", "Deployment Type", "Exchange", "Broker",
+    "Capital Required", "PNL (Last Run)", "PNL (Overall)", "PNL (Live/Open)",
+    "Run Counter", "Completed Runs", "Deployment Date", "Creator",
+]
+display_cols = [c for c in display_cols if c in df_filtered.columns]
+display_df   = df_filtered[display_cols].copy()
 
-pnl_cols = [c for c in display_df.columns if "pnl" in c.lower()]
-def style_pnl(val):
-    try:
-        v = float(val)
-        return f"color: {'#10b981' if v >= 0 else '#ef4444'}; font-weight: 700"
-    except Exception:
-        return ""
+pnl_cols = [c for c in display_df.columns if "PNL" in c]
+styled = display_df.style.applymap(color_pnl, subset=pnl_cols) if pnl_cols else display_df.style
 
-styled = display_df.style.applymap(style_pnl, subset=pnl_cols) if pnl_cols else display_df.style
-st.dataframe(styled, use_container_width=True, height=420)
+# Format number columns nicely
+for col in ["Capital Required", "PNL (Last Run)", "PNL (Overall)", "PNL (Live/Open)"]:
+    if col in display_df.columns:
+        styled = styled.format({col: "₹{:,.2f}"})
 
-# ── Download button ────────────────────────────────────────────────────────────
+for col in ["Run Counter", "Completed Runs"]:
+    if col in display_df.columns:
+        styled = styled.format({col: "{:.0f}"})
+
+st.dataframe(styled, use_container_width=True, height=450)
+
+# ── Per-strategy PNL bar chart ─────────────────────────────────────────────────
+if "Strategy Name" in df_filtered.columns and "PNL (Overall)" in df_filtered.columns:
+    st.markdown("### 📉 Overall PNL by Strategy")
+    chart_df = df_filtered[["Strategy Name", "PNL (Overall)", "PNL (Last Run)"]].copy()
+    chart_df = chart_df.set_index("Strategy Name")
+    st.bar_chart(chart_df)
+
+# ── Download ───────────────────────────────────────────────────────────────────
 st.markdown("### ⬇️ Download")
 csv_bytes     = df.to_csv(index=False).encode("utf-8")
 download_name = selected_file["name"] if selected_file["name"].endswith(".csv") else "pnl_export.csv"
@@ -221,8 +284,8 @@ with col_dl:
 # ── Snapshot history ───────────────────────────────────────────────────────────
 st.markdown("### 🗂️ All Snapshots in Drive")
 for f in snapshot_files[:20]:
-    label    = format_filename_as_datetime(f["name"])
-    size_kb  = int(f.get("size", 0)) // 1024
+    label   = format_filename_as_datetime(f["name"])
+    size_kb = int(f.get("size", 0)) // 1024
     st.markdown(f"""
     <div class="file-card" style="display:flex;justify-content:space-between;align-items:center;">
         <span>📄 {f['name']}</span>
