@@ -260,11 +260,18 @@ for col in ["Run Counter", "Completed Runs"]:
 st.dataframe(styled, use_container_width=True, height=450)
 
 # ── Per-strategy PNL bar chart ─────────────────────────────────────────────────
+# REPLACE with this safe version:
 if "Strategy Name" in df_filtered.columns and "PNL (Overall)" in df_filtered.columns:
     st.markdown("### 📉 Overall PNL by Strategy")
     chart_df = df_filtered[["Strategy Name", "PNL (Overall)", "PNL (Last Run)"]].copy()
-    chart_df = chart_df.set_index("Strategy Name")
-    st.bar_chart(chart_df)
+    chart_df = chart_df.sort_values("PNL (Overall)", ascending=True)
+    st.dataframe(
+        chart_df.style
+            .applymap(color_pnl, subset=["PNL (Overall)", "PNL (Last Run)"])
+            .format({"PNL (Overall)": "₹{:,.2f}", "PNL (Last Run)": "₹{:,.2f}"}),
+        use_container_width=True,
+        height=300
+    )
 
 # ── Download ───────────────────────────────────────────────────────────────────
 st.markdown("### ⬇️ Download")
