@@ -1,13 +1,17 @@
 """
-tradetron_screenshots.py — Full-page screenshots of every Tradetron strategy
-─────────────────────────────────────────────────────────────────────────────
-Reads:   TRADETRON_SESSION env var  (session_json from tradetron_auth.py)
-         pnl_latest.csv             (written by tradetron_scraper.py)
+tradetron_screenshots.py
+─────────────────────────
+Full-page screenshots of every deployed Tradetron strategy.
 
-Writes:  screenshots/strategy_<id>_<YYYY-MM-DD_HH-MM>.png  — one per strategy
-         screenshots/manifest.json  — consumed by tradetron_telegram_notifier.py
+Reads:
+  TRADETRON_SESSION env var   ← session_json from tradetron_auth.py
+  pnl_latest.csv              ← written by tradetron_scraper.py
 
-Dependencies: playwright (installed inline in the workflow)
+Writes:
+  screenshots/strategy_<id>_<YYYY-MM-DD_HH-MM>.png   ← one per strategy
+  screenshots/manifest.json                           ← consumed by telegram notifier
+
+Dependencies: playwright (installed via requirements.txt + playwright install chromium)
 """
 
 import os
@@ -24,70 +28,66 @@ PNL_CSV         = "pnl_latest.csv"
 SCREENSHOTS_DIR = Path("screenshots")
 BASE_URL        = "https://tradetron.tech"
 IST             = timezone(timedelta(hours=5, minutes=30))
-
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-)
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 
 
+# ── Load session ───────────────────────────────────────────────────────────────
 def _load_session() -> dict:
     if not SESSION_ENV:
-        raise RuntimeError("TRADETRON_SESSION env var is not set")
+        raise RuntimeError("[Screenshots] TRADETRON_SESSION env var is not set")
     return json.loads(SESSION_ENV)
 
 
+# ── Read strategies from CSV ───────────────────────────────────────────────────
 def _read_strategies() -> list[dict]:
     """
-    Return list of strategies from pnl_latest.csv.
-    Columns come from tradetron_scraper.py -> parse_strategy():
+    Read strategy list from pnl_latest.csv.
+    Columns (from tradetron_scraper.py -> parse_strategy):
       Strategy ID, Strategy Name, Status, Deployment Type, Exchange, Broker,
       Capital Required, PNL (Last Run), PNL (Overall), PNL (Live/Open),
       Run Counter, Completed Runs, Currency, Deployment Date, Creator, Snapshot Time
     """
     if not Path(PNL_CSV).exists():
-        print(f"[Screenshots] {PNL_CSV} not found — no strategies to screenshot.")
+        print(f"[Screenshots] {PNL_CSV} not found — nothing to screenshot.")
         return []
+
     with open(PNL_CSV, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+
+    # Filter out rows with no Strategy ID (can happen with empty CSV)
+    valid = [r for r in rows if r.get("Strategy ID", "").strip()]
+    print(f"[Screenshots] {len(valid)} strategies to capture (from {PNL_CSV})")
+    return valid
 
 
-async def _screenshot_strategy(
-    page,
-    strategy: dict,
-    timestamp_str: str,
-    out_dir: Path,
-) -> str | None:
-    """Navigate to the strategy page and take a full-page screenshot."""
-    # Column names match tradetron_scraper.py -> parse_strategy()
-    sid  = strategy.get("Strategy ID", "unknown")
+# ── Screenshot one strategy page ──────────────────────────────────────────────
+async def _screenshot_strategy(page, strategy: dict, timestamp_str: str, out_dir: Path) -> str | None:
+    sid  = strategy.get("Strategy ID", "unknown").strip()
     name = strategy.get("Strategy Name", f"strategy_{sid}")
-
-    url = f"{BASE_URL}/deployed-strategy/{sid}"
-    filename = f"strategy_{sid}_{timestamp_str}.png"
-    filepath = out_dir / filename
+    url  = f"{BASE_URL}/deployed-strategy/{sid}"
+    path = out_dir / f"strategy_{sid}_{timestamp_str}.png"
 
     try:
-        print(f"[Screenshots] Capturing '{name}' ({sid}) …")
+        print(f"[Screenshots] Capturing '{name}' (id={sid}) ...")
         await page.goto(url, wait_until="networkidle", timeout=45_000)
-        # Wait for the main content container to be visible
         await page.wait_for_selector("body", state="visible", timeout=15_000)
-        await page.wait_for_timeout(2_000)   # let charts/tables render fully
-        await page.screenshot(path=str(filepath), full_page=True)
-        print(f"[Screenshots]  -> saved: {filepath}")
-        return str(filepath)
+        await page.wait_for_timeout(2_500)   # let charts/tables fully render
+        await page.screenshot(path=str(path), full_page=True)
+        print(f"[Screenshots]   ✓ Saved: {path}")
+        return str(path)
     except Exception as exc:
-        print(f"[Screenshots]  -> FAILED for '{name}': {exc}")
+        print(f"[Screenshots]   ✗ FAILED for '{name}': {exc}")
         return None
 
 
+# ── Main async screenshot loop ─────────────────────────────────────────────────
 async def take_screenshots(strategies: list[dict], session_data: dict) -> list[dict]:
-    """Launch Chromium, inject cookies, screenshot every strategy."""
     SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    now_ist      = datetime.now(IST)
+    now_ist       = datetime.now(IST)
     timestamp_str = now_ist.strftime("%Y-%m-%d_%H-%M")
+    time_label    = now_ist.strftime("%d %b %Y  %I:%M %p IST")
 
-    manifest = []   # [{strategy_id, strategy_name, file, timestamp_ist}]
+    manifest = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -97,25 +97,24 @@ async def take_screenshots(strategies: list[dict], session_data: dict) -> list[d
         )
 
         # Inject session cookies
-        cookies_to_set = [
+        await context.add_cookies([
             {"name": name, "value": value, "domain": "tradetron.tech", "path": "/"}
             for name, value in session_data["cookies"].items()
-        ]
-        await context.add_cookies(cookies_to_set)
+        ])
 
         page = await context.new_page()
 
         for strategy in strategies:
+            sid      = strategy.get("Strategy ID", "unknown").strip()
+            name     = strategy.get("Strategy Name", f"strategy_{sid}")
             filepath = await _screenshot_strategy(page, strategy, timestamp_str, SCREENSHOTS_DIR)
-            # Column names match tradetron_scraper.py -> parse_strategy()
-            sid  = strategy.get("Strategy ID", "unknown")
-            name = strategy.get("Strategy Name", f"strategy_{sid}")
+
             manifest.append({
                 "strategy_id":   sid,
                 "Strategy Name": name,
-                "pnl":           strategy.get("PNL (Overall)", ""),
-                "file":          filepath,          # None if failed
-                "timestamp_ist": now_ist.strftime("%d %b %Y  %I:%M %p IST"),
+                "pnl":           strategy.get("PNL (Overall)", "0"),
+                "file":          filepath,    # None if capture failed
+                "timestamp_ist": time_label,
             })
 
         await browser.close()
@@ -123,23 +122,27 @@ async def take_screenshots(strategies: list[dict], session_data: dict) -> list[d
     return manifest
 
 
+# ── Entry point ────────────────────────────────────────────────────────────────
 def main() -> None:
     session_data = _load_session()
     strategies   = _read_strategies()
 
+    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
     if not strategies:
-        print("[Screenshots] No strategies found — writing empty manifest.")
-        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        print("[Screenshots] No strategies — writing empty manifest.")
         manifest = []
     else:
-        print(f"[Screenshots] Found {len(strategies)} strategy/ies to capture.")
         manifest = asyncio.run(take_screenshots(strategies, session_data))
 
+    # Write manifest for telegram notifier
     manifest_path = SCREENSHOTS_DIR / "manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
-    print(f"[Screenshots] Manifest written → {manifest_path}")
-    print(f"[Screenshots] Done. {sum(1 for m in manifest if m['file'])} / {len(manifest)} screenshots captured.")
+
+    captured = sum(1 for m in manifest if m.get("file"))
+    print(f"\n[Screenshots] Done — {captured}/{len(manifest)} screenshots captured.")
+    print(f"[Screenshots] Manifest → {manifest_path}")
 
 
 if __name__ == "__main__":
