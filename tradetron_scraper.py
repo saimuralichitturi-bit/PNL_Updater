@@ -7,9 +7,15 @@ SESSION SOURCE (in order of priority):
   1. TRADETRON_SESSION env var  ← injected by GitHub Actions from auth step output
   2. tradetron_session.json     ← fallback for local testing
 
-OUTPUT FILES:
-  pnl_YYYY-MM-DD_HH-MM.csv    ←  timestamped snapshot
-  pnl_latest.csv               ←  always overwritten
+EOD_MODE env var:
+  "true"  → End-of-day run: writes pnl_YYYY-MM-DD.csv, pnl_latest.csv,
+             snapshot_path.txt  (used by google_drive_uploader + Telegram)
+  "false" → Intraday run: scrapes data into pnl_latest.csv ONLY (no timestamped
+             snapshot, no pointer file).  Drive upload is skipped in the workflow.
+
+OUTPUT FILES (EOD only):
+  pnl_YYYY-MM-DD.csv           ←  one EOD snapshot per trading day
+  pnl_latest.csv               ←  always overwritten (used by Telegram notifier)
   snapshot_path.txt            ←  filename pointer for google_drive_uploader.py
 """
 
@@ -121,29 +127,36 @@ rows = [parse_strategy(s) for s in raw_strategies]
 ist           = pytz.timezone("Asia/Kolkata")
 now_ist       = datetime.now(ist)
 timestamp_str = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
-file_ts       = now_ist.strftime("%Y-%m-%d_%H-%M")
-SNAPSHOT_CSV  = f"pnl_{file_ts}.csv"
+file_date     = now_ist.strftime("%Y-%m-%d")          # date-only for EOD file name
+SNAPSHOT_CSV  = f"pnl_{file_date}.csv"
 
 df = pd.DataFrame(rows)
 df["Snapshot Time"] = timestamp_str
 df.sort_values("Strategy Name", inplace=True, ignore_index=True)
 
-# ── Write output files ─────────────────────────────────────────────────────────
-df.to_csv(SNAPSHOT_CSV, index=False)
-df.to_csv(LATEST_CSV,   index=False)
+# ── Decide what to write based on EOD_MODE ─────────────────────────────────────
+EOD_MODE = os.environ.get("EOD_MODE", "false").strip().lower() == "true"
 
-with open(SNAPSHOT_PTR_FILE, "w") as f:
-    f.write(SNAPSHOT_CSV)
+# pnl_latest.csv is always written — used by Telegram notifier in both modes
+df.to_csv(LATEST_CSV, index=False)
+
+if EOD_MODE:
+    # End-of-day: save the dated snapshot + pointer for Google Drive uploader
+    df.to_csv(SNAPSHOT_CSV, index=False)
+    with open(SNAPSHOT_PTR_FILE, "w") as f:
+        f.write(SNAPSHOT_CSV)
+    print(f"\n[Scraper] EOD mode — files written:")
+    print(f"  {SNAPSHOT_CSV:<38} <- EOD snapshot")
+    print(f"  {LATEST_CSV:<38} <- latest copy")
+    print(f"  {SNAPSHOT_PTR_FILE:<38} <- pointer for uploader")
+else:
+    print(f"\n[Scraper] Intraday mode — CSV snapshot skipped.")
+    print(f"  {LATEST_CSV:<38} <- latest copy (for Telegram)")
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 total_overall = df["PNL (Overall)"].sum()
 total_last    = df["PNL (Last Run)"].sum()
 total_live    = df["PNL (Live/Open)"].sum()
-
-print(f"\n[Scraper] Files written:")
-print(f"  {SNAPSHOT_CSV:<38} ← timestamped snapshot")
-print(f"  {LATEST_CSV:<38} ← latest copy")
-print(f"  {SNAPSHOT_PTR_FILE:<38} ← pointer for uploader")
 
 print(f"\n[Scraper] Preview:")
 print(df[[
@@ -152,6 +165,6 @@ print(df[[
 ]].to_string())
 
 print(f"\n[Scraper] ── TOTALS ──────────────────────────────────────")
-print(f"  Overall PNL  (all strategies) : ₹{total_overall:>12,.2f}")
-print(f"  Last Run PNL (all strategies) : ₹{total_last:>12,.2f}")
-print(f"  Live PNL     (all strategies) : ₹{total_live:>12,.2f}")
+print(f"  Overall PNL  (all strategies) : Rs.{total_overall:>12,.2f}")
+print(f"  Last Run PNL (all strategies) : Rs.{total_last:>12,.2f}")
+print(f"  Live PNL     (all strategies) : Rs.{total_live:>12,.2f}")
