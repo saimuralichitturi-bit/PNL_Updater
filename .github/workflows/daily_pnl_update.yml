@@ -2,13 +2,37 @@ name: Daily Tradetron PNL Update
 
 on:
   schedule:
-    # 3:16 PM IST = 9:46 AM UTC (IST is UTC+5:30) — runs Mon–Fri (trading days)
+    # ── Hourly market-hours snapshots (IST = UTC+5:30), Mon-Fri ─────────────
+    # Screenshots + Telegram only — NO CSV save, NO Google Drive upload
+    #
+    #  IST 09:15  ->  UTC 03:45
+    #  IST 10:15  ->  UTC 04:45
+    #  IST 11:15  ->  UTC 05:45
+    #  IST 12:15  ->  UTC 06:45
+    #  IST 13:15  ->  UTC 07:45
+    #  IST 14:15  ->  UTC 08:45
+    #  IST 15:15  ->  UTC 09:45
+    - cron: "45 3 * * 1-5"
+    - cron: "45 4 * * 1-5"
+    - cron: "45 5 * * 1-5"
+    - cron: "45 6 * * 1-5"
+    - cron: "45 7 * * 1-5"
+    - cron: "45 8 * * 1-5"
+    - cron: "45 9 * * 1-5"
+    # ── End-of-day (3:16 PM IST -> 09:46 UTC): CSV save + Drive + Telegram ──
     - cron: "46 9 * * 1-5"
   workflow_dispatch:
 
 jobs:
-  update-pnl:
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 1 — Hourly intraday snapshot (runs at every hourly cron EXCEPT 09:46)
+  # Steps: Auth -> Scrape (no CSV) -> Screenshots -> Telegram
+  # ════════════════════════════════════════════════════════════════════════════
+  intraday-snapshot:
+    name: "Intraday Snapshot (screenshots + Telegram)"
     runs-on: ubuntu-latest
+    # Skip this job at 09:46 UTC (that is the EOD run handled by the other job)
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && !startsWith(github.event.schedule, '46 9')) }}
 
     steps:
       - name: Checkout repository
@@ -22,32 +46,103 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ── Step 1: Login ──────────────────────────────────────────────────────
-      # Reads:   TRADETRON_EMAIL, TRADETRON_PASSWORD  (GitHub Secrets)
-      # Outputs: session_json  (passed to next step — never written to repo)
-      - name: "Step 1 — Authenticate with Tradetron"
+      # Step 1: Auth (reuse session if valid, re-login only on expiry)
+      - name: "Step 1 -- Authenticate with Tradetron"
         id: auth
         env:
           TRADETRON_EMAIL:    ${{ secrets.TRADETRON_EMAIL }}
           TRADETRON_PASSWORD: ${{ secrets.TRADETRON_PASSWORD }}
         run: python tradetron_auth.py
 
-      # ── Step 2: Scrape ────────────────────────────────────────────────────
-      # Reads:   session_json from Step 1 output (injected as env var)
-      # Writes:  pnl_YYYY-MM-DD_HH-MM.csv, pnl_latest.csv, snapshot_path.txt
-      - name: "Step 2 — Scrape strategies & PNL, save to CSV"
+      # Step 2: Scrape live PNL into memory only (no CSV written — EOD_MODE=false)
+      - name: "Step 2 -- Scrape live PNL (no CSV)"
+        id: scrape
         env:
           TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
+          EOD_MODE: "false"
         run: python tradetron_scraper.py
 
-      # ── Step 3: Upload ────────────────────────────────────────────────────
-      # Reads:   snapshot_path.txt + CSV files
-      # Uploads: to GOOGLE_DRIVE_FOLDER_ID  (GitHub Secret)
-      - name: "Step 3 — Upload CSV files to Google Drive"
+      # Step 3: Screenshot all strategies
+      - name: "Step 3 -- Screenshot all strategies"
+        id: screenshots
+        env:
+          TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
+        run: |
+          pip install playwright --quiet
+          playwright install chromium --with-deps --quiet
+          python tradetron_screenshots.py
+
+      # Step 4: Telegram notification with PNL + screenshots
+      - name: "Step 4 -- Send Telegram PNL snapshot"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python tradetron_telegram_notifier.py
+
+      - name: Done
+        run: echo "Intraday snapshot complete -- $(date '+%Y-%m-%d %H:%M:%S UTC')"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # JOB 2 — End-of-day (3:16 PM IST / 09:46 UTC)
+  # Steps: Auth -> Scrape (CSV saved) -> Google Drive upload -> Screenshots -> Telegram
+  # ════════════════════════════════════════════════════════════════════════════
+  eod-pnl-update:
+    name: "EOD PNL Update (CSV + Drive + Telegram)"
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'schedule' && startsWith(github.event.schedule, '46 9') }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Step 1: Auth
+      - name: "Step 1 -- Authenticate with Tradetron"
+        id: auth
+        env:
+          TRADETRON_EMAIL:    ${{ secrets.TRADETRON_EMAIL }}
+          TRADETRON_PASSWORD: ${{ secrets.TRADETRON_PASSWORD }}
+        run: python tradetron_auth.py
+
+      # Step 2: Scrape + save CSV (EOD_MODE=true)
+      - name: "Step 2 -- Scrape strategies & PNL, save to CSV"
+        id: scrape
+        env:
+          TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
+          EOD_MODE: "true"
+        run: python tradetron_scraper.py
+
+      # Step 3: Upload CSV to Google Drive
+      - name: "Step 3 -- Upload CSV to Google Drive"
         env:
           GOOGLE_DRIVE_FOLDER_ID:  ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: python google_drive_uploader.py
 
+      # Step 4: Screenshot all strategies
+      - name: "Step 4 -- Screenshot all strategies"
+        id: screenshots
+        env:
+          TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
+        run: |
+          pip install playwright --quiet
+          playwright install chromium --with-deps --quiet
+          python tradetron_screenshots.py
+
+      # Step 5: Telegram EOD summary + screenshots
+      - name: "Step 5 -- Send Telegram EOD PNL summary"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          EOD_MODE: "true"
+        run: python tradetron_telegram_notifier.py
+
       - name: Done
-        run: echo "✅ PNL update complete — $(date '+%Y-%m-%d %H:%M:%S UTC')"
+        run: echo "EOD PNL update complete -- $(date '+%Y-%m-%d %H:%M:%S UTC')"
