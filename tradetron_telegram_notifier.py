@@ -7,16 +7,15 @@ Reads:
   pnl_latest.csv              <- written by tradetron_scraper.py (always present)
   screenshots/manifest.json   <- written by tradetron_screenshots.py
 
-CSV columns (from tradetron_scraper.py -> parse_strategy):
-  Strategy ID, Strategy Name, Status, Deployment Type, Exchange, Broker,
-  Capital Required, PNL (Last Run), PNL (Overall), PNL (Live/Open),
-  Run Counter, Completed Runs, Currency, Deployment Date, Creator,
-  Snapshot Time
-
 Env vars:
   TELEGRAM_BOT_TOKEN   <- GitHub Secret
   TELEGRAM_CHAT_ID     <- GitHub Secret
   EOD_MODE             <- "true" for end-of-day run, "false" for intraday
+
+Fixes:
+  - Table header/data alignment corrected (was off by 2 chars)
+  - sendPhoto falls back to sendDocument if file > 10MB
+  - Robust error handling on photo send (no crash on one failure)
 """
 
 import os
@@ -27,26 +26,29 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-BOT_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID     = os.environ.get("TELEGRAM_CHAT_ID", "")
-EOD_MODE    = os.environ.get("EOD_MODE", "false").strip().lower() == "true"
-PNL_CSV     = "pnl_latest.csv"
-MANIFEST    = Path("screenshots") / "manifest.json"
-BASE_API    = f"https://api.telegram.org/bot{BOT_TOKEN}"
-IST         = timezone(timedelta(hours=5, minutes=30))
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+EOD_MODE  = os.environ.get("EOD_MODE", "false").strip().lower() == "true"
+PNL_CSV   = "pnl_latest.csv"
+MANIFEST  = Path("screenshots") / "manifest.json"
+BASE_API  = f"https://api.telegram.org/bot{BOT_TOKEN}"
+IST       = timezone(timedelta(hours=5, minutes=30))
+
+PHOTO_SIZE_LIMIT = 10 * 1024 * 1024   # 10 MB — Telegram sendPhoto hard limit
 
 # Emojis
-E_GREEN  = "🟢"
-E_RED    = "🔴"
-E_WHITE  = "⚪"
-E_UP     = "📈"
-E_DOWN   = "📉"
-E_CLOCK  = "🕐"
-E_CHART  = "📊"
-E_FIRE   = "🔥"
-E_CAM    = "📸"
-E_EOD    = "🏁"
-E_LIVE   = "⚡"
+E_GREEN = "🟢"
+E_RED   = "🔴"
+E_WHITE = "⚪"
+E_UP    = "📈"
+E_DOWN  = "📉"
+E_CLOCK = "🕐"
+E_CHART = "📊"
+E_FIRE  = "🔥"
+E_CAM   = "📸"
+E_EOD   = "🏁"
+E_LIVE  = "⚡"
+E_DOC   = "📄"
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -89,7 +91,7 @@ def _build_message(rows: list[dict]) -> str:
 
     lines = [
         f"{E_CHART} <b>Tradetron PNL Update</b>",
-        f"{run_type}",
+        run_type,
         f"{E_CLOCK} <code>{ts}</code>",
         "─" * 38,
     ]
@@ -98,13 +100,18 @@ def _build_message(rows: list[dict]) -> str:
         lines.append("<i>No strategy data available.</i>")
         return "\n".join(lines)
 
-    # Column widths
-    name_w = min(max(len(r.get("Strategy Name", "")) for r in rows), 26)
+    # ── Column width ───────────────────────────────────────────────────────────
+    # Each data row is:  "{emoji} {name:<name_w}  {live:>11}  {overall:>11}"
+    # emoji takes 1 char + 1 space = prefix of 2 chars
+    # Header row must match: "  {'Strategy':<name_w}  {'Live PNL':>11}  {'Overall':>11}"
+    # We use name_w for the name field in BOTH header and data rows consistently.
+    name_w = min(max(len(r.get("Strategy Name", "")) for r in rows), 24)
 
+    # Header — 2-space indent to align with "emoji " prefix in data rows
     lines.append(
-        f"<code>{'Strategy':<{name_w}}  {'Live PNL':>11}  {'Overall':>11}</code>"
+        f"<code>{'  ' + 'Strategy':<{name_w + 2}}  {'Live PNL':>11}  {'Overall':>11}</code>"
     )
-    lines.append(f"<code>{'─' * (name_w + 26)}</code>")
+    lines.append(f"<code>{'─' * (name_w + 28)}</code>")
 
     pnl_overall_vals: list[tuple[str, float]] = []
     winners = losers = flat = 0
@@ -115,8 +122,9 @@ def _build_message(rows: list[dict]) -> str:
         overall = _to_float(row.get("PNL (Overall)", 0))
         emoji   = _sign_emoji(overall)
 
+        # emoji + space = 2 chars, then name padded to name_w
         lines.append(
-            f"<code>{emoji} {name:<{name_w - 2}}  {_inr(live):>11}  {_inr(overall):>11}</code>"
+            f"<code>{emoji} {name:<{name_w}}  {_inr(live):>11}  {_inr(overall):>11}</code>"
         )
         pnl_overall_vals.append((row.get("Strategy Name", "—"), overall))
 
@@ -124,7 +132,7 @@ def _build_message(rows: list[dict]) -> str:
         elif overall < 0: losers  += 1
         else:             flat    += 1
 
-    lines.append(f"<code>{'─' * (name_w + 26)}</code>")
+    lines.append(f"<code>{'─' * (name_w + 28)}</code>")
 
     total        = sum(v for _, v in pnl_overall_vals)
     best_n,  bv  = max(pnl_overall_vals, key=lambda x: x[1])
@@ -142,7 +150,7 @@ def _build_message(rows: list[dict]) -> str:
     if EOD_MODE:
         lines += ["", f"{E_EOD} <i>EOD CSV saved to Google Drive.</i>"]
 
-    lines += ["", f"{E_CAM} <i>Strategy screenshots below</i>"]
+    lines += ["", f"{E_CAM} <i>Strategy screenshots below ↓</i>"]
     return "\n".join(lines)
 
 
@@ -159,24 +167,52 @@ def _send_text(text: str) -> None:
         timeout=30,
     )
     if resp.ok:
-        print("[Telegram] Message sent ✓")
+        print("[Telegram] ✓ Message sent")
     else:
-        print(f"[Telegram] sendMessage failed: {resp.status_code} — {resp.text}")
+        print(f"[Telegram] ✗ sendMessage failed: {resp.status_code} — {resp.text}")
         resp.raise_for_status()
 
 
-def _send_photo(filepath: str, caption: str) -> None:
-    with open(filepath, "rb") as photo:
+def _send_photo_or_doc(filepath: str, caption: str) -> None:
+    """
+    Send as photo if file <= 10MB (renders inline in chat).
+    Fall back to sendDocument if larger (avoids Telegram 400 error).
+    """
+    file_size = Path(filepath).stat().st_size
+
+    if file_size <= PHOTO_SIZE_LIMIT:
+        # ── Send as inline photo ──────────────────────────────────────────────
+        with open(filepath, "rb") as f:
+            resp = requests.post(
+                f"{BASE_API}/sendPhoto",
+                data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+                files={"photo": f},
+                timeout=60,
+            )
+        if resp.ok:
+            print(f"[Telegram] ✓ Photo sent: {filepath}  ({file_size / 1024:.0f} KB)")
+            return
+        # If sendPhoto still fails (e.g. image too tall), fall through to sendDocument
+        print(f"[Telegram] sendPhoto failed ({resp.status_code}) — falling back to sendDocument")
+
+    # ── Send as document (no size/dimension limits up to 50MB) ───────────────
+    size_mb = file_size / (1024 * 1024)
+    print(f"[Telegram] Sending as document: {filepath}  ({size_mb:.1f} MB)")
+    with open(filepath, "rb") as f:
         resp = requests.post(
-            f"{BASE_API}/sendPhoto",
-            data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
-            files={"photo": photo},
-            timeout=60,
+            f"{BASE_API}/sendDocument",
+            data={
+                "chat_id":   CHAT_ID,
+                "caption":   caption,
+                "parse_mode": "HTML",
+            },
+            files={"document": f},
+            timeout=120,
         )
     if resp.ok:
-        print(f"[Telegram] Photo sent: {filepath} ✓")
+        print(f"[Telegram] ✓ Document sent: {filepath}")
     else:
-        print(f"[Telegram] sendPhoto failed ({filepath}): {resp.status_code} — {resp.text}")
+        print(f"[Telegram] ✗ sendDocument failed ({filepath}): {resp.status_code} — {resp.text}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -190,26 +226,28 @@ def main() -> None:
     # 1. Send PNL summary text
     _send_text(_build_message(rows))
 
-    # 2. Send screenshots — one photo per strategy, caption = name + PNL
+    # 2. Send screenshots
     if not manifest:
         print("[Telegram] No screenshots in manifest — skipping photos.")
         return
 
-    # Build a quick lookup: strategy_id -> overall PNL from CSV
+    # Build lookup: Strategy ID (str) -> overall PNL
     pnl_lookup = {
-        r.get("Strategy ID", ""): _to_float(r.get("PNL (Overall)", 0))
+        str(r.get("Strategy ID", "")): _to_float(r.get("PNL (Overall)", 0))
         for r in rows
     }
 
+    sent = skipped = 0
     for entry in manifest:
         filepath = entry.get("file")
         if not filepath or not Path(filepath).exists():
-            print(f"[Telegram] Missing screenshot for '{entry.get('Strategy Name')}' — skip.")
+            print(f"[Telegram] ⚠ Missing screenshot for '{entry.get('Strategy Name', '?')}' — skipping.")
+            skipped += 1
             continue
 
-        sid     = entry.get("strategy_id", "")
+        sid     = str(entry.get("strategy_id", ""))
         name    = entry.get("Strategy Name") or entry.get("strategy_name", "Strategy")
-        overall = pnl_lookup.get(str(sid), _to_float(entry.get("pnl", 0)))
+        overall = pnl_lookup.get(sid, _to_float(entry.get("pnl", 0)))
         emoji   = _sign_emoji(overall)
 
         caption = (
@@ -217,9 +255,15 @@ def main() -> None:
             f"Overall PNL: <code>{_inr(overall)}</code>\n"
             f"{E_CLOCK} {entry.get('timestamp_ist', '')}"
         )
-        _send_photo(filepath, caption)
 
-    print("[Telegram] All done.")
+        try:
+            _send_photo_or_doc(filepath, caption)
+            sent += 1
+        except Exception as exc:
+            print(f"[Telegram] ✗ Failed to send '{name}': {exc}")
+            skipped += 1
+
+    print(f"\n[Telegram] Done — {sent} sent, {skipped} skipped.")
 
 
 if __name__ == "__main__":
