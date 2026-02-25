@@ -2,7 +2,7 @@
 tradetron_scraper.py
 ────────────────────
 Scrapes all Tradetron strategies + PNL using the saved session.
-Based on the original working scraper — minimal changes only.
+Now with improved pagination handling.
 
 SESSION SOURCE (in order of priority):
   1. TRADETRON_SESSION env var  ← injected by GitHub Actions from auth step output
@@ -13,7 +13,7 @@ EOD_MODE env var:
   "false" → saves pnl_latest.csv only (for Telegram intraday snapshot)
 
 PAGINATION:
-  Now scrapes ALL pages of strategies, not just the first page.
+  Tries multiple pagination approaches to ensure all strategies are scraped.
 """
 
 import os
@@ -23,6 +23,7 @@ import requests
 import pandas as pd
 from datetime import datetime
 import pytz
+import time
 
 # ── FILE NAMES ─────────────────────────────────────────────────────────────────
 SESSION_FILE      = "tradetron_session.json"
@@ -62,65 +63,120 @@ if token:
 if xsrf:
     BASE_HEADERS["X-XSRF-TOKEN"] = xsrf
 
-# ── API endpoint (original working endpoint) ───────────────────────────────────
-API_URL = "https://tradetron.tech/api/deployed-strategies"
+# ── API endpoint ───────────────────────────────────────────────────────────────
+API_BASE_URL = "https://tradetron.tech/api/deployed-strategies"
 
 
-# ── Fetch strategies with pagination ───────────────────────────────────────────
+# ── Fetch strategies with multiple pagination attempts ─────────────────────────
 def fetch_strategies():
     """
     Fetch all strategies across multiple pages.
-    The API supports pagination via ?page=X query parameter.
+    Tries different pagination parameter formats to ensure compatibility.
     """
     all_strategies = []
     page = 1
-    max_pages = 100  # Safety limit to prevent infinite loops
+    max_pages = 100  # Safety limit
+    
+    print(f"[Scraper] Starting pagination scan...")
     
     while page <= max_pages:
-        url = f"{API_URL}?page={page}"
-        print(f"[Scraper] Fetching page {page} → {url}")
+        # Try different pagination formats
+        urls_to_try = [
+            f"{API_BASE_URL}?page={page}",           # Standard REST pagination
+            f"{API_BASE_URL}?p={page}",              # Alternative format
+            f"{API_BASE_URL}?offset={(page-1)*10}",  # Offset-based
+        ]
         
-        resp = session.get(url, headers=BASE_HEADERS, timeout=30)
-        print(f"[Scraper] Page {page} Status: {resp.status_code}")
+        success = False
+        for url in urls_to_try:
+            if page > 1 and success:  # Only try alternatives on first failure
+                break
+                
+            try:
+                print(f"[Scraper] Attempting: {url}")
+                resp = session.get(url, headers=BASE_HEADERS, timeout=30)
+                
+                if resp.status_code != 200:
+                    print(f"[Scraper] Status {resp.status_code} - trying next format")
+                    continue
 
-        if resp.status_code != 200:
-            raise RuntimeError(f"[Scraper] API returned {resp.status_code}: {resp.text[:200]}")
+                data = resp.json()
+                
+                # Check for success flag
+                if not data.get("success"):
+                    print(f"[Scraper] API returned success=false - trying next format")
+                    continue
 
-        data = resp.json()
-        
-        # If success is False, dump full response for diagnosis
-        if not data.get("success"):
-            print(f"[Scraper] WARNING: success=False on page {page}. Full response: {str(data)[:500]}")
-            break
+                strategies = data.get("data")
+                if not isinstance(strategies, list):
+                    print(f"[Scraper] Unexpected data format - trying next format")
+                    continue
 
-        strategies = data.get("data")
-        if not isinstance(strategies, list):
-            raise RuntimeError(f"[Scraper] Unexpected response shape. Keys: {list(data.keys())}")
-
-        # If no strategies returned, we've reached the end
-        if not strategies:
-            print(f"[Scraper] No strategies on page {page} — pagination complete.")
-            break
+                # Empty list means we've reached the end
+                if not strategies:
+                    if page == 1:
+                        print(f"[Scraper] No strategies on first page - trying next format")
+                        continue
+                    else:
+                        print(f"[Scraper] No more strategies - pagination complete")
+                        return all_strategies
+                
+                print(f"[Scraper] ✓ Page {page}: Found {len(strategies)} strategies")
+                
+                # Check if we got duplicate strategies (indicates we hit the end)
+                new_ids = {s.get("id") for s in strategies if s.get("id")}
+                existing_ids = {s.get("id") for s in all_strategies if s.get("id")}
+                duplicates = new_ids & existing_ids
+                
+                if duplicates and page > 1:
+                    print(f"[Scraper] Found {len(duplicates)} duplicate strategies - reached end")
+                    return all_strategies
+                
+                all_strategies.extend(strategies)
+                success = True
+                
+                # Check pagination metadata
+                meta = data.get("meta") or data.get("pagination") or data.get("links") or {}
+                
+                # Try to determine if there are more pages
+                current_page = meta.get("current_page", page)
+                last_page = meta.get("last_page") or meta.get("total_pages")
+                per_page = meta.get("per_page", 10)
+                total = meta.get("total")
+                
+                print(f"[Scraper] Metadata - current: {current_page}, last: {last_page}, per_page: {per_page}, total: {total}")
+                
+                # Multiple ways to check if we're done
+                if last_page and current_page >= last_page:
+                    print(f"[Scraper] Reached last page ({last_page})")
+                    return all_strategies
+                
+                if total and len(all_strategies) >= total:
+                    print(f"[Scraper] Collected all {total} strategies")
+                    return all_strategies
+                
+                # If we got fewer strategies than per_page, likely the last page
+                if len(strategies) < per_page and per_page > 0:
+                    print(f"[Scraper] Got {len(strategies)} strategies (less than {per_page}) - likely last page")
+                    # Continue to next page to confirm
+                
+                break  # Success - move to next page
+                
+            except Exception as e:
+                print(f"[Scraper] Error with {url}: {e}")
+                continue
         
-        print(f"[Scraper] ✓ Page {page}: {len(strategies)} strategies")
-        all_strategies.extend(strategies)
-        
-        # Check if there are more pages
-        # The API typically includes pagination metadata like 'current_page', 'last_page', etc.
-        pagination = data.get("meta") or data.get("pagination") or {}
-        current_page = pagination.get("current_page", page)
-        last_page = pagination.get("last_page", page)
-        
-        print(f"[Scraper] Pagination: current_page={current_page}, last_page={last_page}")
-        
-        # If we're on the last page, stop
-        if current_page >= last_page:
-            print(f"[Scraper] Reached last page ({last_page})")
-            break
+        if not success:
+            if page == 1:
+                raise RuntimeError("[Scraper] Failed to fetch first page with all URL formats")
+            else:
+                print(f"[Scraper] Failed to fetch page {page} - assuming end of results")
+                break
         
         page += 1
+        time.sleep(0.5)  # Be nice to the API
 
-    print(f"[Scraper] ✓ Total strategies collected across {page} page(s): {len(all_strategies)}")
+    print(f"[Scraper] ✓ Total strategies collected: {len(all_strategies)}")
     return all_strategies
 
 
@@ -179,7 +235,15 @@ if not raw_strategies:
     empty_df.to_csv(LATEST_CSV, index=False)
     sys.exit(0)
 
-rows = [parse_strategy(s) for s in raw_strategies]
+# Remove duplicates based on Strategy ID
+unique_strategies = {}
+for s in raw_strategies:
+    sid = s.get("id")
+    if sid and sid not in unique_strategies:
+        unique_strategies[sid] = s
+
+print(f"[Scraper] Removed {len(raw_strategies) - len(unique_strategies)} duplicate strategies")
+rows = [parse_strategy(s) for s in unique_strategies.values()]
 
 df = pd.DataFrame(rows)
 df["Snapshot Time"] = timestamp_str
@@ -211,13 +275,14 @@ total_overall = df["PNL (Overall)"].sum()
 total_last    = df["PNL (Last Run)"].sum()
 total_live    = df["PNL (Live/Open)"].sum()
 
-print(f"\n[Scraper] Preview:")
-print(df[[
+print(f"\n[Scraper] Preview (first 10 strategies):")
+preview_df = df[[
     "Strategy Name", "Status", "Broker",
     "PNL (Last Run)", "PNL (Overall)", "PNL (Live/Open)", "Run Counter"
-]].to_string())
+]].head(10)
+print(preview_df.to_string())
 
-print(f"\n[Scraper] ── TOTALS ──────────────────────────────────────")
+print(f"\n[Scraper] ── TOTALS ({len(df)} strategies) ──────────────")
 print(f"  Overall PNL  : ₹{total_overall:>12,.2f}")
 print(f"  Last Run PNL : ₹{total_last:>12,.2f}")
 print(f"  Live PNL     : ₹{total_live:>12,.2f}")
