@@ -55,14 +55,15 @@ jobs:
           EOD_MODE: "false"
         run: python tradetron_scraper.py
 
-      - name: "Step 3 -- Screenshot all strategies"
+      - name: "Step 3 -- Install Playwright browser"
+        run: python -m playwright install chromium --with-deps
+
+      - name: "Step 4 -- Screenshot all strategies"
         env:
           TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
-        run: |
-          playwright install chromium --with-deps
-          python tradetron_screenshots.py
+        run: python tradetron_screenshots.py
 
-      - name: "Step 4 -- Send Telegram PNL snapshot"
+      - name: "Step 5 -- Send Telegram PNL snapshot"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -110,14 +111,15 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: python google_drive_uploader.py
 
-      - name: "Step 4 -- Screenshot all strategies"
+      - name: "Step 4 -- Install Playwright browser"
+        run: python -m playwright install chromium --with-deps
+
+      - name: "Step 5 -- Screenshot all strategies"
         env:
           TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
-        run: |
-          playwright install chromium --with-deps
-          python tradetron_screenshots.py
+        run: python tradetron_screenshots.py
 
-      - name: "Step 5 -- Send Telegram EOD PNL summary"
+      - name: "Step 6 -- Send Telegram EOD PNL summary"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
