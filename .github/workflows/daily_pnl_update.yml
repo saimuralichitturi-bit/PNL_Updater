@@ -61,7 +61,7 @@ jobs:
       - name: "Step 4 -- Send Telegram PNL snapshot"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
         run: python tradetron_telegram_notifier.py
 
       - name: Done
@@ -112,7 +112,7 @@ jobs:
       - name: "Step 5 -- Send Telegram EOD PNL summary"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
           EOD_MODE: "true"
         run: python tradetron_telegram_notifier.py
 
