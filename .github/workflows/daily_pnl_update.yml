@@ -26,7 +26,7 @@ jobs:
   # JOB 1 — Hourly intraday snapshot
   # ════════════════════════════════════════════════════════════════════════════
   intraday-snapshot:
-    name: "Intraday Snapshot (screenshots + Telegram)"
+    name: "Intraday Snapshot (cards + Telegram)"
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && !startsWith(github.event.schedule, '46 9')) }}
 
@@ -49,21 +49,16 @@ jobs:
           TRADETRON_PASSWORD: ${{ secrets.TRADETRON_PASSWORD }}
         run: python tradetron_auth.py
 
-      - name: "Step 2 -- Scrape live PNL (no CSV)"
+      - name: "Step 2 -- Scrape live PNL"
         env:
           TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
           EOD_MODE: "false"
         run: python tradetron_scraper.py
 
-      - name: "Step 3 -- Install Playwright browser"
-        run: python -m playwright install chromium --with-deps
-
-      - name: "Step 4 -- Screenshot all strategies"
-        env:
-          TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
+      - name: "Step 3 -- Generate strategy cards"
         run: python tradetron_screenshots.py
 
-      - name: "Step 5 -- Send Telegram PNL snapshot"
+      - name: "Step 4 -- Send Telegram PNL snapshot"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -111,15 +106,10 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: python google_drive_uploader.py
 
-      - name: "Step 4 -- Install Playwright browser"
-        run: python -m playwright install chromium --with-deps
-
-      - name: "Step 5 -- Screenshot all strategies"
-        env:
-          TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
+      - name: "Step 4 -- Generate strategy cards"
         run: python tradetron_screenshots.py
 
-      - name: "Step 6 -- Send Telegram EOD PNL summary"
+      - name: "Step 5 -- Send Telegram EOD PNL summary"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
