@@ -27,7 +27,11 @@ from pathlib import Path
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+CHAT_IDS = [
+    cid.strip()
+    for cid in os.environ.get("TELEGRAM_CHAT_IDS", "").split(",")
+    if cid.strip()
+]
 EOD_MODE  = os.environ.get("EOD_MODE", "false").strip().lower() == "true"
 PNL_CSV   = "pnl_latest.csv"
 MANIFEST  = Path("screenshots") / "manifest.json"
@@ -156,69 +160,64 @@ def _build_message(rows: list[dict]) -> str:
 
 # ── Telegram senders ───────────────────────────────────────────────────────────
 def _send_text(text: str) -> None:
-    resp = requests.post(
-        f"{BASE_API}/sendMessage",
-        json={
-            "chat_id":    CHAT_ID,
-            "text":       text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        },
-        timeout=30,
-    )
-    if resp.ok:
-        print("[Telegram] ✓ Message sent")
-    else:
-        print(f"[Telegram] ✗ sendMessage failed: {resp.status_code} — {resp.text}")
-        resp.raise_for_status()
+    for chat_id in CHAT_IDS:
+        resp = requests.post(
+            f"{BASE_API}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=30,
+        )
+        if resp.ok:
+            print(f"[Telegram] ✓ Message sent to {chat_id}")
+        else:
+            print(f"[Telegram] ✗ sendMessage failed ({chat_id}): {resp.status_code} — {resp.text}")
+
 
 
 def _send_photo_or_doc(filepath: str, caption: str) -> None:
-    """
-    Send as photo if file <= 10MB (renders inline in chat).
-    Fall back to sendDocument if larger (avoids Telegram 400 error).
-    """
     file_size = Path(filepath).stat().st_size
 
-    if file_size <= PHOTO_SIZE_LIMIT:
-        # ── Send as inline photo ──────────────────────────────────────────────
+    for chat_id in CHAT_IDS:
+
+        if file_size <= PHOTO_SIZE_LIMIT:
+            with open(filepath, "rb") as f:
+                resp = requests.post(
+                    f"{BASE_API}/sendPhoto",
+                    data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+                    files={"photo": f},
+                    timeout=60,
+                )
+            if resp.ok:
+                print(f"[Telegram] ✓ Photo sent to {chat_id}")
+                continue
+            print(f"[Telegram] sendPhoto failed ({chat_id}) — fallback to document")
+
         with open(filepath, "rb") as f:
             resp = requests.post(
-                f"{BASE_API}/sendPhoto",
-                data={"chat_id": CHAT_ID, "caption": caption, "parse_mode": "HTML"},
-                files={"photo": f},
-                timeout=60,
+                f"{BASE_API}/sendDocument",
+                data={
+                    "chat_id": chat_id,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                },
+                files={"document": f},
+                timeout=120,
             )
-        if resp.ok:
-            print(f"[Telegram] ✓ Photo sent: {filepath}  ({file_size / 1024:.0f} KB)")
-            return
-        # If sendPhoto still fails (e.g. image too tall), fall through to sendDocument
-        print(f"[Telegram] sendPhoto failed ({resp.status_code}) — falling back to sendDocument")
 
-    # ── Send as document (no size/dimension limits up to 50MB) ───────────────
-    size_mb = file_size / (1024 * 1024)
-    print(f"[Telegram] Sending as document: {filepath}  ({size_mb:.1f} MB)")
-    with open(filepath, "rb") as f:
-        resp = requests.post(
-            f"{BASE_API}/sendDocument",
-            data={
-                "chat_id":   CHAT_ID,
-                "caption":   caption,
-                "parse_mode": "HTML",
-            },
-            files={"document": f},
-            timeout=120,
-        )
-    if resp.ok:
-        print(f"[Telegram] ✓ Document sent: {filepath}")
-    else:
-        print(f"[Telegram] ✗ sendDocument failed ({filepath}): {resp.status_code} — {resp.text}")
+        if resp.ok:
+            print(f"[Telegram] ✓ Document sent to {chat_id}")
+        else:
+            print(f"[Telegram] ✗ Failed sending to {chat_id}: {resp.status_code}")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main() -> None:
-    if not BOT_TOKEN or not CHAT_ID:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set.")
+    if not BOT_TOKEN or not CHAT_IDS:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_IDS must be set.")
 
     rows     = _load_csv()
     manifest = _load_manifest()
