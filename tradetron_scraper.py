@@ -11,6 +11,9 @@ SESSION SOURCE (in order of priority):
 EOD_MODE env var:
   "true"  → saves pnl_YYYY-MM-DD.csv + snapshot_path.txt (for Google Drive)
   "false" → saves pnl_latest.csv only (for Telegram intraday snapshot)
+
+PAGINATION:
+  Now scrapes ALL pages of strategies, not just the first page.
 """
 
 import os
@@ -63,29 +66,62 @@ if xsrf:
 API_URL = "https://tradetron.tech/api/deployed-strategies"
 
 
-# ── Fetch strategies ───────────────────────────────────────────────────────────
+# ── Fetch strategies with pagination ───────────────────────────────────────────
 def fetch_strategies():
-    print(f"[Scraper] Fetching → {API_URL}")
-    resp = session.get(API_URL, headers=BASE_HEADERS, timeout=30)
-    print(f"[Scraper] Status: {resp.status_code}")
+    """
+    Fetch all strategies across multiple pages.
+    The API supports pagination via ?page=X query parameter.
+    """
+    all_strategies = []
+    page = 1
+    max_pages = 100  # Safety limit to prevent infinite loops
+    
+    while page <= max_pages:
+        url = f"{API_URL}?page={page}"
+        print(f"[Scraper] Fetching page {page} → {url}")
+        
+        resp = session.get(url, headers=BASE_HEADERS, timeout=30)
+        print(f"[Scraper] Page {page} Status: {resp.status_code}")
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"[Scraper] API returned {resp.status_code}: {resp.text[:200]}")
+        if resp.status_code != 200:
+            raise RuntimeError(f"[Scraper] API returned {resp.status_code}: {resp.text[:200]}")
 
-    data = resp.json()
-    print(f"[Scraper] Response keys: {list(data.keys())}")
-    print(f"[Scraper] success={data.get('success')} | records={len(data.get('data') or [])}")
+        data = resp.json()
+        
+        # If success is False, dump full response for diagnosis
+        if not data.get("success"):
+            print(f"[Scraper] WARNING: success=False on page {page}. Full response: {str(data)[:500]}")
+            break
 
-    # If success is False, dump full response for diagnosis
-    if not data.get("success"):
-        print(f"[Scraper] WARNING: success=False. Full response: {str(data)[:500]}")
+        strategies = data.get("data")
+        if not isinstance(strategies, list):
+            raise RuntimeError(f"[Scraper] Unexpected response shape. Keys: {list(data.keys())}")
 
-    strategies = data.get("data")
-    if not isinstance(strategies, list):
-        raise RuntimeError(f"[Scraper] Unexpected response shape. Keys: {list(data.keys())}")
+        # If no strategies returned, we've reached the end
+        if not strategies:
+            print(f"[Scraper] No strategies on page {page} — pagination complete.")
+            break
+        
+        print(f"[Scraper] ✓ Page {page}: {len(strategies)} strategies")
+        all_strategies.extend(strategies)
+        
+        # Check if there are more pages
+        # The API typically includes pagination metadata like 'current_page', 'last_page', etc.
+        pagination = data.get("meta") or data.get("pagination") or {}
+        current_page = pagination.get("current_page", page)
+        last_page = pagination.get("last_page", page)
+        
+        print(f"[Scraper] Pagination: current_page={current_page}, last_page={last_page}")
+        
+        # If we're on the last page, stop
+        if current_page >= last_page:
+            print(f"[Scraper] Reached last page ({last_page})")
+            break
+        
+        page += 1
 
-    print(f"[Scraper] ✓ Got {len(strategies)} strategies")
-    return strategies
+    print(f"[Scraper] ✓ Total strategies collected across {page} page(s): {len(all_strategies)}")
+    return all_strategies
 
 
 # ── Parse a single strategy dict into a flat CSV row ──────────────────────────
