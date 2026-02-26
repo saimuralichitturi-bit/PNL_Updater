@@ -1,12 +1,11 @@
 """
 tradetron_auth.py — Pure requests + Altcha PoW solver
 ──────────────────────────────────────────────────────
-Always performs a fresh login on every run.
-GitHub Actions runners are ephemeral — session files don't persist,
-so session reuse adds complexity with no benefit.
+Performs a fresh email/password login on every run.
+No session token reuse — always logs in from scratch.
 
 Outputs:
-  - GITHUB_OUTPUT step export: session_json  (passed to scraper + screenshots)
+  - GITHUB_OUTPUT step export: session_json  (cookies + fresh XSRF token)
 """
 
 import os
@@ -52,7 +51,7 @@ def solve_altcha(challenge_url: str, session: requests.Session) -> str:
     raise RuntimeError(f"[Altcha] Unsolvable within {max_number} iterations")
 
 
-# ── Fresh login ────────────────────────────────────────────────────────────────
+# ── Email/password login ───────────────────────────────────────────────────────
 def do_login() -> dict:
     if not TRADETRON_EMAIL or not TRADETRON_PASSWORD:
         raise RuntimeError("TRADETRON_EMAIL and TRADETRON_PASSWORD must be set")
@@ -63,14 +62,21 @@ def do_login() -> dict:
     session.get(BASE_URL, headers={"User-Agent": UA}, timeout=30)
 
     print("[Auth] Fetching login page...")
-    login_page = session.get(f"{BASE_URL}/login",
-                             headers={"User-Agent": UA, "Accept": "text/html"}, timeout=30)
+    login_page = session.get(
+        f"{BASE_URL}/login",
+        headers={"User-Agent": UA, "Accept": "text/html"},
+        timeout=30,
+    )
     soup = BeautifulSoup(login_page.text, "html.parser")
 
+    # Extract CSRF token from the login form
     csrf_input = soup.find("input", {"name": "_token"})
     csrf_token = csrf_input["value"] if csrf_input else ""
     print(f"[Auth] CSRF token: {'found' if csrf_token else 'NOT FOUND'}")
+    if not csrf_token:
+        raise RuntimeError("[Auth] Could not find CSRF _token on login page")
 
+    # Solve Altcha proof-of-work challenge
     altcha_widget = soup.find("altcha-widget")
     if not altcha_widget:
         altcha_widget = soup.find(lambda tag: tag.name and "altcha" in tag.name.lower())
@@ -83,8 +89,8 @@ def do_login() -> dict:
 
     altcha_payload = solve_altcha(challenge_url, session)
 
-    raw_xsrf   = session.cookies.get("XSRF-TOKEN", "")
-    xsrf_token = unquote(raw_xsrf)
+    # Use the pre-login XSRF only for the form POST itself
+    pre_login_xsrf = unquote(session.cookies.get("XSRF-TOKEN", ""))
 
     form_data = {
         "_token":         csrf_token,
@@ -94,18 +100,23 @@ def do_login() -> dict:
         "reference":      "",
         "force_redirect": "",
     }
-    headers = {
+    post_headers = {
         "User-Agent":   UA,
         "Referer":      f"{BASE_URL}/login",
         "Origin":       BASE_URL,
         "Accept":       "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Content-Type": "application/x-www-form-urlencoded",
-        "X-XSRF-TOKEN": xsrf_token,
+        "X-XSRF-TOKEN": pre_login_xsrf,
     }
 
-    print("[Auth] Submitting login form...")
-    resp = session.post(f"{BASE_URL}/login", data=form_data, headers=headers,
-                        allow_redirects=True, timeout=30)
+    print(f"[Auth] Logging in as {TRADETRON_EMAIL}...")
+    resp = session.post(
+        f"{BASE_URL}/login",
+        data=form_data,
+        headers=post_headers,
+        allow_redirects=True,
+        timeout=30,
+    )
     print(f"[Auth] POST status: {resp.status_code} | Final URL: {resp.url}")
 
     if "/login" in resp.url:
@@ -113,13 +124,24 @@ def do_login() -> dict:
 
     print(f"[Auth] ✓ Login SUCCESS → {resp.url}")
 
+    # Fetch the dashboard so Tradetron issues a fresh post-login XSRF-TOKEN.
+    # The pre-login token is stale and will cause /api/* calls to return success=false.
+    print("[Auth] Fetching dashboard to refresh XSRF-TOKEN...")
+    session.get(
+        f"{BASE_URL}/user/dashboard",
+        headers={"User-Agent": UA, "Accept": "text/html"},
+        timeout=30,
+    )
+
     cookies_dict = dict(session.cookies)
+    fresh_xsrf   = unquote(cookies_dict.get("XSRF-TOKEN", ""))
+
     print(f"[Auth] Cookies: {list(cookies_dict.keys())}")
+    print(f"[Auth] XSRF-TOKEN (post-login): {'✓ present' if fresh_xsrf else '✗ MISSING'}")
 
     return {
         "cookies": cookies_dict,
-        "token":   None,
-        "xsrf":    unquote(cookies_dict.get("XSRF-TOKEN", "")),
+        "xsrf":    fresh_xsrf,
     }
 
 
@@ -138,10 +160,6 @@ def export_session(session_data: dict) -> None:
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
-def login() -> None:
+if __name__ == "__main__":
     session_data = do_login()
     export_session(session_data)
-
-
-if __name__ == "__main__":
-    login()
