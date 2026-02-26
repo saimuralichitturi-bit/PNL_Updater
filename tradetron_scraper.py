@@ -1,15 +1,11 @@
 """
 tradetron_scraper.py
 ────────────────────
-Scrapes all Tradetron strategies + PNL using cookies from the auth step.
-
-SESSION SOURCE:
-  TRADETRON_SESSION env var — injected by GitHub Actions from tradetron_auth.py output.
-  Contains: { "cookies": {...}, "xsrf": "..." }
-
-EOD_MODE env var:
-  "true"  → saves pnl_YYYY-MM-DD.csv + snapshot_path.txt (for Google Drive)
-  "false" → saves pnl_latest.csv only (for Telegram intraday snapshot)
+Robust Tradetron scraper with:
+- Exchange selection (IND)
+- XSRF auto-refresh
+- Retry logic
+- Session validation
 """
 
 import os
@@ -20,111 +16,112 @@ import pandas as pd
 from datetime import datetime
 import pytz
 import time
+from urllib.parse import unquote
 
-# ── FILE NAMES ─────────────────────────────────────────────────────────────────
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+BASE_URL = "https://tradetron.tech"
+API_BASE_URL = f"{BASE_URL}/api/deployed-strategies"
+
 SNAPSHOT_PTR_FILE = "snapshot_path.txt"
-LATEST_CSV        = "pnl_latest.csv"
-BASE_URL          = "https://tradetron.tech"
-
-# ── Load session from env var (set by tradetron_auth.py via GITHUB_OUTPUT) ─────
-session_json_str = os.environ.get("TRADETRON_SESSION", "")
-if not session_json_str:
-    raise RuntimeError(
-        "[Scraper] TRADETRON_SESSION env var is not set. "
-        "Make sure the auth step ran successfully and exported session_json."
-    )
-
-print("[Scraper] Loading session from TRADETRON_SESSION env var")
-session_data = json.loads(session_json_str)
-
-cookies = session_data.get("cookies", {})
-xsrf    = session_data.get("xsrf", "")
-
-if not cookies:
-    raise RuntimeError("[Scraper] No cookies found in session data — auth step likely failed.")
-
-print(f"[Scraper] Cookies loaded: {list(cookies.keys())}")
-print(f"[Scraper] XSRF-TOKEN: {'✓ present' if xsrf else '✗ MISSING'}")
-
-# ── Build requests session ─────────────────────────────────────────────────────
-session = requests.Session()
-session.cookies.update(cookies)
+LATEST_CSV = "pnl_latest.csv"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 
+# ── LOAD SESSION ──────────────────────────────────────────────────────────────
+session_json_str = os.environ.get("TRADETRON_SESSION", "")
+
+if not session_json_str:
+    raise RuntimeError("[Scraper] TRADETRON_SESSION env var is missing")
+
+print("[Scraper] Loading session...")
+
+session_data = json.loads(session_json_str)
+
+cookies = session_data.get("cookies", {})
+xsrf = session_data.get("xsrf", "")
+
+if not cookies:
+    raise RuntimeError("[Scraper] No cookies found")
+
+print(f"[Scraper] Cookies loaded: {list(cookies.keys())}")
+print(f"[Scraper] XSRF present: {'YES' if xsrf else 'NO'}")
+
+# ── SESSION SETUP ─────────────────────────────────────────────────────────────
+session = requests.Session()
+session.cookies.update(cookies)
+
 API_HEADERS = {
-    "User-Agent":       UA,
-    "Accept":           "application/json, text/plain, */*",
-    "Origin":           BASE_URL,
-    "Referer":          f"{BASE_URL}/user/dashboard",
+    "User-Agent": UA,
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json",
+    "Origin": BASE_URL,
+    "Referer": f"{BASE_URL}/user/dashboard",
     "X-Requested-With": "XMLHttpRequest",
-    "X-XSRF-TOKEN":     xsrf,
+    "X-XSRF-TOKEN": xsrf,
 }
 
-API_BASE_URL = "https://tradetron.tech/api/deployed-strategies"
+# ── REFRESH XSRF TOKEN ────────────────────────────────────────────────────────
+def refresh_xsrf_from_cookies():
+    global xsrf, API_HEADERS
 
+    xsrf_cookie = session.cookies.get("XSRF-TOKEN")
 
-# ── NEW: Select India (IND) exchange via the language/exchange dropdown ────────
-def select_india_exchange() -> None:
-    """
-    Mimics clicking the exchange dropdown and selecting 'IND — Exchanges for India'.
-    Hits the /set/cookie/IN endpoint which sets the exchange preference cookie,
-    exactly as the frontend does when the user clicks:
-      <a href="https://tradetron.tech/set/cookie/IN">IND</a>
-    """
+    if xsrf_cookie:
+        xsrf = unquote(xsrf_cookie)
+        API_HEADERS["X-XSRF-TOKEN"] = xsrf
+        print("[Scraper] ✓ XSRF token refreshed")
+    else:
+        print("[Scraper] ⚠ XSRF cookie not found")
+
+# ── SELECT INDIA EXCHANGE ─────────────────────────────────────────────────────
+def select_india_exchange():
     url = f"{BASE_URL}/set/cookie/IN"
-    print(f"[Scraper] Selecting India exchange: GET {url}")
 
-    nav_headers = {
-        "User-Agent": UA,
-        "Accept":     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Referer":    f"{BASE_URL}/user/dashboard",
-    }
+    print(f"[Scraper] Selecting India exchange...")
 
     try:
-        resp = session.get(url, headers=nav_headers, allow_redirects=True, timeout=30)
-        print(f"[Scraper] Exchange select status: {resp.status_code} | Final URL: {resp.url}")
+        resp = session.get(
+            url,
+            headers={
+                "User-Agent": UA,
+                "Referer": f"{BASE_URL}/user/dashboard",
+            },
+            allow_redirects=True,
+            timeout=30,
+        )
 
-        # Log any new/updated cookies
-        updated = {k: v for k, v in session.cookies.items()}
-        print(f"[Scraper] Cookies after exchange select: {list(updated.keys())}")
+        print(f"[Scraper] Exchange status: {resp.status_code}")
+
+        # Refresh cookies → VERY IMPORTANT
+        refresh_xsrf_from_cookies()
 
         if resp.status_code in (200, 302):
-            print("[Scraper] ✓ India (IND) exchange selected successfully")
-            
+            print("[Scraper] ✓ India exchange set")
         else:
-            print(f"[Scraper] ⚠ Unexpected status {resp.status_code} — continuing anyway")
+            print("[Scraper] ⚠ Exchange selection issue")
 
     except Exception as e:
-        # Non-fatal: log and continue; strategies may still be fetched
-        print(f"[Scraper] ⚠ Exchange selection request failed: {e} — continuing anyway")
+        print(f"[Scraper] ⚠ Exchange error: {e}")
 
-
-# ── Single page fetch with diagnostics ────────────────────────────────────────
-def _fetch_page(url: str) -> dict | None:
+# ── FETCH PAGE ────────────────────────────────────────────────────────────────
+def _fetch_page(url):
     try:
         resp = session.get(url, headers=API_HEADERS, timeout=30)
+
         print(f"[Scraper]   HTTP {resp.status_code}")
 
         if resp.status_code == 401:
-            print("[Scraper]   → 401 Unauthorized — login likely failed")
+            print("[Scraper]   → Unauthorized (session expired)")
             return None
 
-        content_type = resp.headers.get("Content-Type", "")
-        if "text/html" in content_type:
-            preview = resp.text[:300].replace("\n", " ")
-            print(f"[Scraper]   → Got HTML instead of JSON (login redirect?): {preview}")
-            return None
-
-        if resp.status_code != 200:
-            print(f"[Scraper]   → Unexpected status {resp.status_code}")
+        if "text/html" in resp.headers.get("Content-Type", ""):
+            print("[Scraper]   → Got HTML (login redirect)")
             return None
 
         data = resp.json()
 
         if not data.get("success"):
-            preview = str(data)[:400]
-            print(f"[Scraper]   → API returned success=false: {preview}")
+            print(f"[Scraper]   → success=false")
             return None
 
         return data
@@ -133,172 +130,122 @@ def _fetch_page(url: str) -> dict | None:
         print(f"[Scraper]   → Exception: {e}")
         return None
 
+# ── RETRY WRAPPER ─────────────────────────────────────────────────────────────
+def fetch_with_retry(url, retries=3, delay=3):
+    for i in range(retries):
+        data = _fetch_page(url)
+        if data:
+            return data
 
-# ── Paginated strategy fetch ───────────────────────────────────────────────────
-def fetch_strategies() -> list:
+        print(f"[Scraper] Retry {i+1}/{retries}...")
+        time.sleep(delay)
+
+        # refresh xsrf every retry
+        refresh_xsrf_from_cookies()
+
+    return None
+
+# ── FETCH STRATEGIES ──────────────────────────────────────────────────────────
+def fetch_strategies():
     all_strategies = []
     page = 1
-    max_pages = 100
 
-    print("[Scraper] Starting strategy fetch...")
+    print("[Scraper] Fetching strategies...")
 
-    while page <= max_pages:
+    while True:
         url = f"{API_BASE_URL}?page={page}"
-        print(f"[Scraper] Fetching page {page}: {url}")
+        print(f"[Scraper] Page {page}")
 
-        data = _fetch_page(url)
+        data = fetch_with_retry(url)
 
-        if data is None:
+        if not data:
             if page == 1:
-                # Dump full raw response for diagnosis before giving up
-                print("[Scraper] ── Raw response dump (page 1) ────────────────────────")
-                try:
-                    resp = session.get(url, headers=API_HEADERS, timeout=30)
-                    print(f"  Status : {resp.status_code}")
-                    print(f"  Headers: {dict(resp.headers)}")
-                    print(f"  Body   : {resp.text[:600]}")
-                except Exception as e:
-                    print(f"  Could not dump response: {e}")
-                print("[Scraper] ─────────────────────────────────────────────────────")
-                raise RuntimeError(
-                    "[Scraper] Failed to fetch page 1. "
-                    "Session cookies are likely invalid — check the auth step logs."
-                )
-            else:
-                print(f"[Scraper] Failed on page {page} — treating as end of results")
-                break
+                raise RuntimeError("[Scraper] Failed page 1 → invalid session")
+            break
 
         strategies = data.get("data", [])
-        if not isinstance(strategies, list):
-            print(f"[Scraper] Unexpected 'data' type: {type(strategies)} — stopping")
-            break
 
         if not strategies:
-            print(f"[Scraper] Empty page {page} — done")
             break
 
-        print(f"[Scraper] ✓ Page {page}: {len(strategies)} strategies")
-
-        # Duplicate check
-        new_ids      = {s.get("id") for s in strategies if s.get("id")}
-        existing_ids = {s.get("id") for s in all_strategies if s.get("id")}
-        if new_ids & existing_ids and page > 1:
-            print(f"[Scraper] Duplicate IDs detected — reached end")
-            break
+        print(f"[Scraper] ✓ {len(strategies)} strategies")
 
         all_strategies.extend(strategies)
 
-        # Pagination metadata
-        meta         = data.get("meta") or data.get("pagination") or {}
-        current_page = meta.get("current_page", page)
-        last_page    = meta.get("last_page") or meta.get("total_pages")
-        per_page     = meta.get("per_page", 10)
-        total        = meta.get("total")
-
-        print(f"[Scraper]   Meta → current={current_page} last={last_page} per_page={per_page} total={total}")
-
-        if last_page and current_page >= last_page:
-            print(f"[Scraper] Reached last page ({last_page})")
-            break
-        if total and len(all_strategies) >= total:
-            print(f"[Scraper] Collected all {total} strategies")
-            break
-
         page += 1
-        time.sleep(0.5)
+        time.sleep(1)
 
-    print(f"[Scraper] ✓ Total collected: {len(all_strategies)} strategies")
+    print(f"[Scraper] Total: {len(all_strategies)}")
     return all_strategies
 
-
-# ── Parse strategy dict into CSV row ──────────────────────────────────────────
-def parse_strategy(s: dict) -> dict:
-    template        = s.get("template") or {}
+# ── PARSE ─────────────────────────────────────────────────────────────────────
+def parse_strategy(s):
+    template = s.get("template") or {}
     strategy_broker = s.get("strategy_broker") or {}
-    broker          = strategy_broker.get("broker") or {}
+    broker = strategy_broker.get("broker") or {}
 
     return {
-        "Strategy ID":      s.get("id", ""),
-        "Strategy Name":    template.get("name", ""),
-        "Status":           s.get("status", ""),
-        "Deployment Type":  s.get("deployment_type", ""),
-        "Exchange":         s.get("exchange", "") or strategy_broker.get("exchange", ""),
-        "Broker":           broker.get("name", ""),
+        "Strategy ID": s.get("id", ""),
+        "Strategy Name": template.get("name", ""),
+        "Status": s.get("status", ""),
+        "Deployment Type": s.get("deployment_type", ""),
+        "Exchange": s.get("exchange", ""),
+        "Broker": broker.get("name", ""),
         "Capital Required": template.get("capital_required", 0),
-        "PNL (Last Run)":   round(float(s.get("last_pnl") or 0), 2),
-        "PNL (Overall)":    round(float(s.get("all_pnl")  or 0), 2),
-        "PNL (Live/Open)":  round(float(s.get("globalPt") or 0), 2),
-        "Run Counter":      s.get("run_counter")     or 0,
-        "Completed Runs":   s.get("max_run_counter") or 0,
-        "Currency":         s.get("currency_code", "INR"),
-        "Deployment Date":  s.get("deployment_date", "")[:10] if s.get("deployment_date") else "",
-        "Creator":          (template.get("user") or {}).get("name", ""),
+        "PNL (Last Run)": round(float(s.get("last_pnl") or 0), 2),
+        "PNL (Overall)": round(float(s.get("all_pnl") or 0), 2),
+        "PNL (Live/Open)": round(float(s.get("globalPt") or 0), 2),
+        "Run Counter": s.get("run_counter") or 0,
+        "Completed Runs": s.get("max_run_counter") or 0,
+        "Currency": s.get("currency_code", "INR"),
+        "Deployment Date": (s.get("deployment_date") or "")[:10],
+        "Creator": (template.get("user") or {}).get("name", ""),
     }
 
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-
-# Step 0: Select India (IND) exchange — mimics dropdown click in the UI
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 select_india_exchange()
 
-# Small pause to let the exchange cookie propagate before API calls
-time.sleep(8)
-raw_strategies = fetch_strategies()
+print("[Scraper] Waiting 5 seconds...")
+time.sleep(5)
 
-ist           = pytz.timezone("Asia/Kolkata")
-now_ist       = datetime.now(ist)
-timestamp_str = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
-file_date     = now_ist.strftime("%Y-%m-%d")
-SNAPSHOT_CSV  = f"pnl_{file_date}.csv"
+raw = fetch_strategies()
 
-if not raw_strategies:
-    print("[Scraper] ⚠️  No strategies returned — writing empty CSV.")
-    pd.DataFrame(columns=[
-        "Strategy ID", "Strategy Name", "Status", "Deployment Type", "Exchange",
-        "Broker", "Capital Required", "PNL (Last Run)", "PNL (Overall)",
-        "PNL (Live/Open)", "Run Counter", "Completed Runs", "Currency",
-        "Deployment Date", "Creator", "Snapshot Time",
-    ]).to_csv(LATEST_CSV, index=False)
-    sys.exit(0)
+if not raw:
+    print("[Scraper] No data")
+    sys.exit(1)
 
-# Deduplicate by Strategy ID
-unique = {}
-for s in raw_strategies:
-    sid = s.get("id")
-    if sid and sid not in unique:
-        unique[sid] = s
-
-print(f"[Scraper] Removed {len(raw_strategies) - len(unique)} duplicates")
+# Deduplicate
+unique = {s["id"]: s for s in raw if s.get("id")}
 
 df = pd.DataFrame([parse_strategy(s) for s in unique.values()])
-df["Snapshot Time"] = timestamp_str
 
-if "Strategy Name" in df.columns:
-    df.sort_values("Strategy Name", inplace=True, ignore_index=True)
+# Timestamp
+ist = pytz.timezone("Asia/Kolkata")
+now = datetime.now(ist)
 
-# ── Write CSV files ────────────────────────────────────────────────────────────
-EOD_MODE = os.environ.get("EOD_MODE", "false").strip().lower() == "true"
+df["Snapshot Time"] = now.strftime("%Y-%m-%d %H:%M:%S IST")
 
+df.sort_values("Strategy Name", inplace=True)
+
+# Save
+EOD_MODE = os.environ.get("EOD_MODE", "false").lower() == "true"
+
+LATEST_CSV = "pnl_latest.csv"
 df.to_csv(LATEST_CSV, index=False)
 
 if EOD_MODE:
-    df.to_csv(SNAPSHOT_CSV, index=False)
-    with open(SNAPSHOT_PTR_FILE, "w") as f:
-        f.write(SNAPSHOT_CSV)
-    print(f"\n[Scraper] EOD mode:")
-    print(f"  {SNAPSHOT_CSV:<38} <- EOD snapshot")
-    print(f"  {LATEST_CSV:<38} <- latest copy")
-    print(f"  {SNAPSHOT_PTR_FILE:<38} <- pointer for uploader")
+    SNAPSHOT = f"pnl_{now.strftime('%Y-%m-%d')}.csv"
+    df.to_csv(SNAPSHOT, index=False)
+
+    with open("snapshot_path.txt", "w") as f:
+        f.write(SNAPSHOT)
+
+    print(f"[Scraper] EOD saved: {SNAPSHOT}")
 else:
-    print(f"\n[Scraper] Intraday mode:")
-    print(f"  {LATEST_CSV:<38} <- latest copy (for Telegram)")
+    print("[Scraper] Intraday saved")
 
-# ── Summary ────────────────────────────────────────────────────────────────────
-print(f"\n[Scraper] Preview (first 10):")
-print(df[["Strategy Name", "Status", "Broker",
-          "PNL (Last Run)", "PNL (Overall)", "PNL (Live/Open)", "Run Counter"]].head(10).to_string())
-
-print(f"\n[Scraper] ── TOTALS ({len(df)} strategies) ──────────────")
-print(f"  Overall PNL  : ₹{df['PNL (Overall)'].sum():>12,.2f}")
-print(f"  Last Run PNL : ₹{df['PNL (Last Run)'].sum():>12,.2f}")
-print(f"  Live PNL     : ₹{df['PNL (Live/Open)'].sum():>12,.2f}")
+# Summary
+print("\n[Scraper] TOTALS")
+print(f"Overall PNL : ₹{df['PNL (Overall)'].sum():,.2f}")
+print(f"Last Run PNL: ₹{df['PNL (Last Run)'].sum():,.2f}")
+print(f"Live PNL    : ₹{df['PNL (Live/Open)'].sum():,.2f}")
