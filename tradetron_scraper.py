@@ -91,6 +91,7 @@ def select_india_exchange() -> None:
 
         if resp.status_code in (200, 302):
             print("[Scraper] ✓ India (IND) exchange selected successfully")
+            
         else:
             print(f"[Scraper] ⚠ Unexpected status {resp.status_code} — continuing anyway")
 
@@ -241,8 +242,7 @@ def parse_strategy(s: dict) -> dict:
 select_india_exchange()
 
 # Small pause to let the exchange cookie propagate before API calls
-time.sleep(1)
-
+time.sleep(8)
 raw_strategies = fetch_strategies()
 
 ist           = pytz.timezone("Asia/Kolkata")
