@@ -3,24 +3,11 @@ tradetron_scraper.py
 ────────────────────
 Scrapes all Tradetron strategies + PNL using cookies from the auth step.
 
-SESSION SOURCE:
-  TRADETRON_SESSION env var — injected by GitHub Actions from tradetron_auth.py output.
-  Contains: { "cookies": {...}, "xsrf": "..." }
+KEY INSIGHT: The API /api/deployed-strategies requires filter parameters.
+The frontend sends these based on the "Deployed" tab + "Expiry" dropdown
+visible in the UI. Without them the API returns success=false, data=[].
 
-EOD_MODE env var:
-  "true"  → saves pnl_YYYY-MM-DD.csv + snapshot_path.txt (for Google Drive)
-  "false" → saves pnl_latest.csv only (for Telegram intraday snapshot)
-
-FIXES APPLIED:
-  1. CookieConflictError — after /set/cookie/IN the server sets domain-specific
-     cookies (domain=tradetron.tech) alongside the original domain-less ones from
-     auth. requests.Session.cookies.get() raises CookieConflictError when two
-     cookies share the same name. Fixed by:
-       a) _get_cookie() — always prefer domain=tradetron.tech over domain=''.
-       b) _clear_domainless_cookies() — purge the domain-less duplicates after
-          the server has issued proper domain-specific replacements.
-  2. Content-Type on GET — removed from API headers (caused Laravel to spin up
-     a fresh anonymous session, returning success=false).
+We probe multiple known parameter combinations and use whichever succeeds.
 """
 
 import os
@@ -51,15 +38,13 @@ if not session_json_str:
 
 print("[Scraper] Loading session...")
 session_data = json.loads(session_json_str)
-
-cookies = session_data.get("cookies", {})
-xsrf    = session_data.get("xsrf", "")
+cookies      = session_data.get("cookies", {})
+xsrf         = session_data.get("xsrf", "")
 
 if not cookies:
     raise RuntimeError("[Scraper] No cookies found in session data")
 
-print(f"[Scraper] Cookies loaded  : {list(cookies.keys())}")
-print(f"[Scraper] XSRF present    : {'YES — ' + xsrf[:40] + '...' if xsrf else 'NO'}")
+print(f"[Scraper] Cookies loaded: {list(cookies.keys())}")
 
 # ── SESSION SETUP ──────────────────────────────────────────────────────────────
 session = requests.Session()
@@ -67,58 +52,39 @@ session.cookies.update(cookies)
 
 
 # ── COOKIE HELPERS ─────────────────────────────────────────────────────────────
-def _get_cookie(name: str) -> str:
-    """
-    Safely retrieve a cookie value by name.
-    Prefers domain=tradetron.tech over domain='' to avoid CookieConflictError
-    when both exist after /set/cookie/IN sets domain-specific replacements.
-    """
+def _get_cookie(name):
+    """Prefer domain=tradetron.tech to avoid CookieConflictError."""
     best = ""
     for c in session.cookies:
         if c.name == name:
             if c.domain == "tradetron.tech":
-                return c.value          # highest priority — stop immediately
-            best = c.value             # fallback candidate
+                return c.value
+            best = c.value
     return best
 
 
-def _fresh_xsrf() -> str:
-    """URL-decode the XSRF-TOKEN, always preferring domain=tradetron.tech."""
+def _fresh_xsrf():
     raw = _get_cookie("XSRF-TOKEN")
     return unquote(raw) if raw else unquote(xsrf)
 
 
-def _clear_domainless_cookies() -> None:
-    """
-    Remove cookies with empty/None domain that were loaded from the auth step.
-    After /set/cookie/IN the server re-issues them as domain=tradetron.tech.
-    The old domain-less ones are now stale duplicates that cause
-    requests.CookieConflictError on any .get("XSRF-TOKEN") call.
-    """
-    to_remove = [
-        (c.name, c.domain, c.path)
-        for c in session.cookies
-        if not c.domain
-    ]
+def _clear_domainless_cookies():
+    """Remove domain='' duplicates left over from the auth step."""
+    to_remove = [(c.name, c.domain, c.path) for c in session.cookies if not c.domain]
     for name, domain, path in to_remove:
         session.cookies.clear(domain, path, name)
     if to_remove:
-        removed = [n for n, _, _ in to_remove]
-        print(f"[Scraper] ✓ Cleared {len(to_remove)} domain-less duplicate(s): {removed}")
+        print(f"[Scraper] Cleared {len(to_remove)} domain-less cookie(s): {[n for n,_,_ in to_remove]}")
 
 
-def _dump_cookies(label: str) -> None:
-    print(f"[Scraper] [{label}] Cookie jar:")
+def _dump_cookies(label):
+    print(f"[Scraper] [{label}]")
     for c in session.cookies:
-        print(f"  {c.name:<25} domain={c.domain!r:<20} path={c.path}  value={str(c.value)[:50]}")
+        print(f"  {c.name:<25} domain={c.domain!r:<22} value={str(c.value)[:50]}")
 
 
-def _api_headers() -> dict:
-    """
-    Build headers for JSON API GET calls.
-    NOTE: No Content-Type — including it on GET requests causes Laravel to
-    treat the call as stateless/anonymous (fresh session → success=false).
-    """
+def _api_headers():
+    """No Content-Type on GET — causes Laravel to ignore the session cookie."""
     return {
         "User-Agent":       UA,
         "Accept":           "application/json, text/plain, */*",
@@ -130,158 +96,145 @@ def _api_headers() -> dict:
 
 
 # ── SELECT INDIA EXCHANGE ──────────────────────────────────────────────────────
-def select_india_exchange() -> None:
-    """
-    Mimics clicking the IND flag dropdown item in the Tradetron header.
-    Sequence:
-      1. GET /set/cookie/IN  → server sets exchange preference + rotates cookies
-      2. _clear_domainless_cookies() → remove stale domain-less duplicates
-      3. Re-fetch /user/dashboard    → stabilise session with IN preference
-    """
-    url = f"{BASE_URL}/set/cookie/IN"
-    print(f"\n[Scraper] ── Exchange Selection ───────────────────────────────")
-    print(f"[Scraper] GET {url}")
-
-    nav_headers = {
-        "User-Agent": UA,
-        "Accept":     "text/html,application/xhtml+xml,*/*;q=0.8",
-        "Referer":    f"{BASE_URL}/user/dashboard",
-    }
-
+def select_india_exchange():
+    print(f"\n[Scraper] ── Exchange Selection ─────────────────────────────")
     try:
-        resp = session.get(url, headers=nav_headers, allow_redirects=True, timeout=30)
-        print(f"[Scraper] Status: {resp.status_code} | Final URL: {resp.url}")
-        print(f"[Scraper] Set-Cookie received: {'YES' if resp.headers.get('Set-Cookie') else 'NO'}")
-
-        _dump_cookies("after /set/cookie/IN")
-
-        # ── KEY FIX: purge domain-less duplicates NOW, before any cookie reads ──
-        _clear_domainless_cookies()
-
-        _dump_cookies("after clearing domain-less duplicates")
-
-        # Re-fetch dashboard to stabilise the session with IN preference
-        print(f"[Scraper] Re-fetching dashboard to stabilise session...")
-        session.get(
-            f"{BASE_URL}/user/dashboard",
-            headers={**nav_headers, "Referer": f"{BASE_URL}/set/cookie/IN"},
+        resp = session.get(
+            f"{BASE_URL}/set/cookie/IN",
+            headers={"User-Agent": UA, "Accept": "text/html", "Referer": f"{BASE_URL}/user/dashboard"},
             allow_redirects=True,
             timeout=30,
         )
+        print(f"[Scraper] /set/cookie/IN -> {resp.status_code} | {resp.url}")
+        _clear_domainless_cookies()
 
-        _dump_cookies("after dashboard re-fetch")
-
-        cc = _get_cookie("country_code")
-        print(f"[Scraper] country_code cookie = '{unquote(cc)[:30] if cc else 'NOT SET'}'")
-        print(f"[Scraper] ✓ India (IND) exchange selected")
-
-    except Exception as e:
-        print(f"[Scraper] ⚠ Exchange selection failed: {e} — continuing anyway")
-
-    print(f"[Scraper] ──────────────────────────────────────────────────────\n")
-
-
-# ── SESSION HEALTH CHECK ───────────────────────────────────────────────────────
-def verify_session() -> None:
-    print("[Scraper] Verifying session health...")
-    try:
-        resp = session.get(
+        session.get(
             f"{BASE_URL}/user/dashboard",
             headers={"User-Agent": UA, "Accept": "text/html"},
             allow_redirects=True,
             timeout=30,
         )
-        if "/login" in resp.url:
-            raise RuntimeError(f"[Scraper] Session DEAD — redirected to {resp.url}")
-        print(f"[Scraper] ✓ Session alive (final URL: {resp.url})")
-    except RuntimeError:
-        raise
+        _clear_domainless_cookies()
+        print(f"[Scraper] India exchange selected")
     except Exception as e:
-        print(f"[Scraper] ⚠ Session check exception: {e} — continuing")
+        print(f"[Scraper] Exchange selection error: {e}")
+    print(f"[Scraper] ─────────────────────────────────────────────────────\n")
+
+
+# ── PROBE: find working API params ─────────────────────────────────────────────
+# The Tradetron frontend sends filter params with the deployed-strategies request.
+# The screenshot shows "Expiry" in the filter dropdown on the Deployed tab.
+# We try all known combinations until one returns success=true with data.
+PARAM_CANDIDATES = [
+    {"type": "expiry"},
+    {"type": "deployed"},
+    {"type": "all"},
+    {"deployment_type": "expiry"},
+    {"deployment_type": "deployed"},
+    {"deployment_type": "all"},
+    {"status": "all"},
+    {"filter": "all"},
+    {"tab": "deployed"},
+    {},
+]
+
+ENDPOINT_CANDIDATES = [
+    f"{BASE_URL}/api/deployed-strategies",
+    f"{BASE_URL}/api/strategies/deployed",
+    f"{BASE_URL}/api/user/deployed-strategies",
+    f"{BASE_URL}/api/my-strategies",
+]
+
+
+def _probe_api_params():
+    """
+    Try each candidate endpoint + param set.
+    Return the first combo that gives success=true with non-empty data.
+    """
+    print("[Scraper] ── Probing API parameter combinations ─────────────────")
+
+    for endpoint in ENDPOINT_CANDIDATES:
+        for params in PARAM_CANDIDATES:
+            probe = {**params, "page": 1}
+            try:
+                resp = session.get(endpoint, params=probe, headers=_api_headers(), timeout=30)
+                if resp.headers.get("Set-Cookie"):
+                    _clear_domainless_cookies()
+                if resp.status_code != 200:
+                    print(f"[Scraper]   {resp.status_code} {endpoint} {probe}")
+                    continue
+                if "text/html" in resp.headers.get("Content-Type", ""):
+                    print(f"[Scraper]   HTML {endpoint} {probe}")
+                    continue
+                data = resp.json()
+                success   = data.get("success")
+                data_list = data.get("data", [])
+                print(f"[Scraper]   success={success} data_len={len(data_list)} | {endpoint} params={probe}")
+                if success and data_list:
+                    print(f"[Scraper] FOUND working combination!")
+                    print(f"  Endpoint : {endpoint}")
+                    print(f"  Params   : {params}")
+                    return {"endpoint": endpoint, "params": params}
+            except Exception as e:
+                print(f"[Scraper]   error={e} | {endpoint} {probe}")
+
+    print("[Scraper] ── No combination succeeded ──────────────────────────")
+    return None
 
 
 # ── SINGLE PAGE FETCH ──────────────────────────────────────────────────────────
-def _fetch_page(url: str) -> dict | None:
-    hdrs = _api_headers()
-    print(f"[Scraper]   XSRF sent: {hdrs['X-XSRF-TOKEN'][:40]}...")
-
+def _fetch_page(url, params):
     try:
-        resp = session.get(url, headers=hdrs, timeout=30)
-        print(f"[Scraper]   HTTP {resp.status_code}")
-
+        resp = session.get(url, params=params, headers=_api_headers(), timeout=30)
         if resp.headers.get("Set-Cookie"):
-            print(f"[Scraper]   Set-Cookie in API response — clearing domain-less duplicates")
             _clear_domainless_cookies()
-
         if resp.status_code == 401:
-            print("[Scraper]   → 401 Unauthorized")
+            print("[Scraper]   -> 401 Unauthorized")
             return None
-
-        ct = resp.headers.get("Content-Type", "")
-        if "text/html" in ct:
-            print(f"[Scraper]   → HTML response (login redirect?): {resp.text[:200]}")
+        if "text/html" in resp.headers.get("Content-Type", ""):
+            print("[Scraper]   -> HTML redirect")
             return None
-
         if resp.status_code != 200:
-            print(f"[Scraper]   → Unexpected HTTP {resp.status_code}")
+            print(f"[Scraper]   -> HTTP {resp.status_code}")
             return None
-
         data = resp.json()
-
         if not data.get("success"):
-            print(f"[Scraper]   → success=false — raw: {str(data)[:300]}")
-            _dump_cookies("at failure")
+            print(f"[Scraper]   -> success=false: {str(data)[:200]}")
             return None
-
         return data
-
     except Exception as e:
-        print(f"[Scraper]   → Exception: {e}")
+        print(f"[Scraper]   -> Exception: {e}")
         return None
 
 
-# ── PAGINATED STRATEGY FETCH ───────────────────────────────────────────────────
-def fetch_strategies() -> list:
+# ── PAGINATED FETCH ────────────────────────────────────────────────────────────
+def fetch_strategies(endpoint, base_params):
     all_strategies = []
     page      = 1
     max_pages = 100
 
-    print("[Scraper] Starting strategy fetch...")
+    print(f"[Scraper] Fetching: {endpoint} params={base_params}")
 
     while page <= max_pages:
-        url = f"{API_BASE_URL}?page={page}"
-        print(f"\n[Scraper] ── Page {page} {'─'*40}")
-        print(f"[Scraper] GET {url}")
+        params = {**base_params, "page": page}
+        print(f"[Scraper] Page {page}...")
 
-        data = _fetch_page(url)
-
+        data = _fetch_page(endpoint, params)
         if data is None:
             if page == 1:
-                print("[Scraper] ── Raw dump (page 1) ─────────────────────────────")
-                try:
-                    resp = session.get(url, headers=_api_headers(), timeout=30)
-                    print(f"  Status    : {resp.status_code}")
-                    print(f"  CT        : {resp.headers.get('Content-Type', '')}")
-                    print(f"  Set-Cookie: {resp.headers.get('Set-Cookie', '')[:200]}")
-                    print(f"  Body      : {resp.text[:600]}")
-                except Exception as ex:
-                    print(f"  Dump error: {ex}")
-                print("[Scraper] ─────────────────────────────────────────────────")
-                raise RuntimeError("[Scraper] Failed page 1 — see dump above")
-            print(f"[Scraper] Failed page {page} — stopping")
+                raise RuntimeError("[Scraper] Failed page 1 after probe succeeded")
             break
 
         strategies = data.get("data", [])
         if not isinstance(strategies, list) or not strategies:
-            print(f"[Scraper] No more strategies on page {page}")
+            print(f"[Scraper] No more data on page {page}")
             break
 
-        print(f"[Scraper] ✓ Page {page}: {len(strategies)} strategies")
+        print(f"[Scraper] Page {page}: {len(strategies)} strategies")
 
         existing_ids = {s.get("id") for s in all_strategies}
-        new_ids      = {s.get("id") for s in strategies}
-        if new_ids & existing_ids and page > 1:
-            print("[Scraper] Duplicate IDs — end of pagination")
+        if {s.get("id") for s in strategies} & existing_ids and page > 1:
+            print("[Scraper] Duplicate IDs - end of pagination")
             break
 
         all_strategies.extend(strategies)
@@ -291,7 +244,7 @@ def fetch_strategies() -> list:
         last_page    = meta.get("last_page") or meta.get("total_pages")
         total        = meta.get("total")
 
-        print(f"[Scraper] Meta → current={current_page} last={last_page} total={total}")
+        print(f"[Scraper]   Meta: current={current_page} last={last_page} total={total}")
 
         if last_page and current_page >= last_page:
             break
@@ -301,16 +254,15 @@ def fetch_strategies() -> list:
         page += 1
         time.sleep(0.5)
 
-    print(f"\n[Scraper] ✓ Total collected: {len(all_strategies)} strategies")
+    print(f"[Scraper] Total collected: {len(all_strategies)}")
     return all_strategies
 
 
 # ── PARSE ──────────────────────────────────────────────────────────────────────
-def parse_strategy(s: dict) -> dict:
+def parse_strategy(s):
     template        = s.get("template") or {}
     strategy_broker = s.get("strategy_broker") or {}
     broker          = strategy_broker.get("broker") or {}
-
     return {
         "Strategy ID":      s.get("id", ""),
         "Strategy Name":    template.get("name", ""),
@@ -334,28 +286,46 @@ def parse_strategy(s: dict) -> dict:
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
-# 1. Select India exchange + clear domain-less duplicate cookies
+# 1. Select India exchange
 select_india_exchange()
 
-# 2. Verify session is alive
-verify_session()
-
-# 3. Wait for server-side preference to propagate
-print("[Scraper] Waiting 5 seconds for exchange preference to propagate...")
+# 2. Wait for session propagation
+print("[Scraper] Waiting 5 seconds...")
 time.sleep(5)
 
-# 4. Fetch strategies
-raw_strategies = fetch_strategies()
+# 3. Probe for correct API params
+working = _probe_api_params()
 
-# 5. Timestamps
+if working is None:
+    print("\n[Scraper] ── DIAGNOSTIC DUMP ─────────────────────────────────────")
+    try:
+        resp = session.get(f"{API_BASE_URL}?page=1", headers=_api_headers(), timeout=30)
+        print(f"  Status    : {resp.status_code}")
+        print(f"  CT        : {resp.headers.get('Content-Type')}")
+        print(f"  Set-Cookie: {resp.headers.get('Set-Cookie','')[:300]}")
+        print(f"  Body      : {resp.text[:800]}")
+        _dump_cookies("diagnostic")
+    except Exception as e:
+        print(f"  Error: {e}")
+    print("[Scraper] ─────────────────────────────────────────────────────────")
+    raise RuntimeError(
+        "[Scraper] Could not find working API params.\n"
+        "ACTION NEEDED: Open Chrome DevTools -> Network tab on the Tradetron "
+        "Deployed page, find the /api/deployed-strategies request and share "
+        "the exact URL + query params it uses."
+    )
+
+# 4. Fetch all pages
+raw_strategies = fetch_strategies(working["endpoint"], working["params"])
+
+# 5. Handle empty
 ist      = pytz.timezone("Asia/Kolkata")
 now_ist  = datetime.now(ist)
 ts_str   = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
 date_str = now_ist.strftime("%Y-%m-%d")
 
-# 6. Handle empty
 if not raw_strategies:
-    print("[Scraper] ⚠ No strategies returned — writing empty CSV")
+    print("[Scraper] No strategies found - writing empty CSV")
     pd.DataFrame(columns=[
         "Strategy ID", "Strategy Name", "Status", "Deployment Type", "Exchange",
         "Broker", "Capital Required", "PNL (Last Run)", "PNL (Overall)",
@@ -364,7 +334,7 @@ if not raw_strategies:
     ]).to_csv(LATEST_CSV, index=False)
     sys.exit(0)
 
-# 7. Deduplicate + build DataFrame
+# 6. Deduplicate + build DataFrame
 unique = {s["id"]: s for s in raw_strategies if s.get("id")}
 print(f"[Scraper] Removed {len(raw_strategies) - len(unique)} duplicates")
 
@@ -372,7 +342,7 @@ df = pd.DataFrame([parse_strategy(s) for s in unique.values()])
 df["Snapshot Time"] = ts_str
 df.sort_values("Strategy Name", inplace=True, ignore_index=True)
 
-# 8. Write CSVs
+# 7. Write CSVs
 EOD_MODE = os.environ.get("EOD_MODE", "false").strip().lower() == "true"
 df.to_csv(LATEST_CSV, index=False)
 
@@ -381,19 +351,16 @@ if EOD_MODE:
     df.to_csv(SNAPSHOT_CSV, index=False)
     with open(SNAPSHOT_PTR_FILE, "w") as f:
         f.write(SNAPSHOT_CSV)
-    print(f"\n[Scraper] EOD mode:")
-    print(f"  {SNAPSHOT_CSV:<38} <- EOD snapshot")
-    print(f"  {LATEST_CSV:<38} <- latest copy")
-    print(f"  {SNAPSHOT_PTR_FILE:<38} <- pointer for uploader")
+    print(f"\n[Scraper] EOD: {SNAPSHOT_CSV} + {LATEST_CSV} saved")
 else:
-    print(f"\n[Scraper] Intraday mode: {LATEST_CSV} saved")
+    print(f"\n[Scraper] Intraday: {LATEST_CSV} saved")
 
-# 9. Summary
+# 8. Summary
 print(f"\n[Scraper] Preview (first 10):")
 print(df[["Strategy Name", "Status", "Broker",
           "PNL (Last Run)", "PNL (Overall)", "PNL (Live/Open)", "Run Counter"]].head(10).to_string())
 
-print(f"\n[Scraper] ── TOTALS ({len(df)} strategies) ─────────────────────")
-print(f"  Overall PNL  : ₹{df['PNL (Overall)'].sum():>12,.2f}")
-print(f"  Last Run PNL : ₹{df['PNL (Last Run)'].sum():>12,.2f}")
-print(f"  Live PNL     : ₹{df['PNL (Live/Open)'].sum():>12,.2f}")
+print(f"\n[Scraper] TOTALS ({len(df)} strategies)")
+print(f"  Overall PNL  : Rs.{df['PNL (Overall)'].sum():>12,.2f}")
+print(f"  Last Run PNL : Rs.{df['PNL (Last Run)'].sum():>12,.2f}")
+print(f"  Live PNL     : Rs.{df['PNL (Live/Open)'].sum():>12,.2f}")
