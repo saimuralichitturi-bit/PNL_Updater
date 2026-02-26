@@ -64,14 +64,22 @@ API_HEADERS = {
 def refresh_xsrf_from_cookies():
     global xsrf, API_HEADERS
 
-    xsrf_cookie = session.cookies.get("XSRF-TOKEN")
+    xsrf_value = None
 
-    if xsrf_cookie:
-        xsrf = unquote(xsrf_cookie)
+    # Iterate over all cookies and pick the correct XSRF-TOKEN
+    for cookie in session.cookies:
+        if cookie.name == "XSRF-TOKEN":
+            xsrf_value = cookie.value
+            # Prefer root path cookie
+            if cookie.path == "/":
+                break
+
+    if xsrf_value:
+        xsrf = unquote(xsrf_value)
         API_HEADERS["X-XSRF-TOKEN"] = xsrf
-        print("[Scraper] ✓ XSRF token refreshed")
+        print("[Scraper] ✓ XSRF token refreshed (resolved conflict)")
     else:
-        print("[Scraper] ⚠ XSRF cookie not found")
+        print("[Scraper] ⚠ XSRF token not found")
 
 # ── SELECT INDIA EXCHANGE ─────────────────────────────────────────────────────
 def select_india_exchange():
