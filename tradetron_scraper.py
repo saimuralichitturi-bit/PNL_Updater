@@ -24,6 +24,7 @@ import time
 # ── FILE NAMES ─────────────────────────────────────────────────────────────────
 SNAPSHOT_PTR_FILE = "snapshot_path.txt"
 LATEST_CSV        = "pnl_latest.csv"
+BASE_URL          = "https://tradetron.tech"
 
 # ── Load session from env var (set by tradetron_auth.py via GITHUB_OUTPUT) ─────
 session_json_str = os.environ.get("TRADETRON_SESSION", "")
@@ -49,16 +50,53 @@ print(f"[Scraper] XSRF-TOKEN: {'✓ present' if xsrf else '✗ MISSING'}")
 session = requests.Session()
 session.cookies.update(cookies)
 
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+
 API_HEADERS = {
-    "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent":       UA,
     "Accept":           "application/json, text/plain, */*",
-    "Origin":           "https://tradetron.tech",
-    "Referer":          "https://tradetron.tech/user/dashboard",
+    "Origin":           BASE_URL,
+    "Referer":          f"{BASE_URL}/user/dashboard",
     "X-Requested-With": "XMLHttpRequest",
     "X-XSRF-TOKEN":     xsrf,
 }
 
 API_BASE_URL = "https://tradetron.tech/api/deployed-strategies"
+
+
+# ── NEW: Select India (IND) exchange via the language/exchange dropdown ────────
+def select_india_exchange() -> None:
+    """
+    Mimics clicking the exchange dropdown and selecting 'IND — Exchanges for India'.
+    Hits the /set/cookie/IN endpoint which sets the exchange preference cookie,
+    exactly as the frontend does when the user clicks:
+      <a href="https://tradetron.tech/set/cookie/IN">IND</a>
+    """
+    url = f"{BASE_URL}/set/cookie/IN"
+    print(f"[Scraper] Selecting India exchange: GET {url}")
+
+    nav_headers = {
+        "User-Agent": UA,
+        "Accept":     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer":    f"{BASE_URL}/user/dashboard",
+    }
+
+    try:
+        resp = session.get(url, headers=nav_headers, allow_redirects=True, timeout=30)
+        print(f"[Scraper] Exchange select status: {resp.status_code} | Final URL: {resp.url}")
+
+        # Log any new/updated cookies
+        updated = {k: v for k, v in session.cookies.items()}
+        print(f"[Scraper] Cookies after exchange select: {list(updated.keys())}")
+
+        if resp.status_code in (200, 302):
+            print("[Scraper] ✓ India (IND) exchange selected successfully")
+        else:
+            print(f"[Scraper] ⚠ Unexpected status {resp.status_code} — continuing anyway")
+
+    except Exception as e:
+        # Non-fatal: log and continue; strategies may still be fetched
+        print(f"[Scraper] ⚠ Exchange selection request failed: {e} — continuing anyway")
 
 
 # ── Single page fetch with diagnostics ────────────────────────────────────────
@@ -198,6 +236,13 @@ def parse_strategy(s: dict) -> dict:
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+
+# Step 0: Select India (IND) exchange — mimics dropdown click in the UI
+select_india_exchange()
+
+# Small pause to let the exchange cookie propagate before API calls
+time.sleep(1)
+
 raw_strategies = fetch_strategies()
 
 ist           = pytz.timezone("Asia/Kolkata")
