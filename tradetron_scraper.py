@@ -11,12 +11,16 @@ EOD_MODE env var:
   "true"  → saves pnl_YYYY-MM-DD.csv + snapshot_path.txt (for Google Drive)
   "false" → saves pnl_latest.csv only (for Telegram intraday snapshot)
 
-ROOT CAUSE FIX (success=false):
-  The API was receiving a brand-new anonymous session because:
-  1. Content-Type: application/json on a GET request caused Laravel to
-     treat the request as a fresh/anonymous context and ignore the session cookie.
-  2. The XSRF token must be URL-decoded before use as a header value.
-  Both are fixed here.
+FIXES APPLIED:
+  1. CookieConflictError — after /set/cookie/IN the server sets domain-specific
+     cookies (domain=tradetron.tech) alongside the original domain-less ones from
+     auth. requests.Session.cookies.get() raises CookieConflictError when two
+     cookies share the same name. Fixed by:
+       a) _get_cookie() — always prefer domain=tradetron.tech over domain=''.
+       b) _clear_domainless_cookies() — purge the domain-less duplicates after
+          the server has issued proper domain-specific replacements.
+  2. Content-Type on GET — removed from API headers (caused Laravel to spin up
+     a fresh anonymous session, returning success=false).
 """
 
 import os
@@ -61,18 +65,59 @@ print(f"[Scraper] XSRF present    : {'YES — ' + xsrf[:40] + '...' if xsrf else
 session = requests.Session()
 session.cookies.update(cookies)
 
-# ── HELPERS ────────────────────────────────────────────────────────────────────
+
+# ── COOKIE HELPERS ─────────────────────────────────────────────────────────────
+def _get_cookie(name: str) -> str:
+    """
+    Safely retrieve a cookie value by name.
+    Prefers domain=tradetron.tech over domain='' to avoid CookieConflictError
+    when both exist after /set/cookie/IN sets domain-specific replacements.
+    """
+    best = ""
+    for c in session.cookies:
+        if c.name == name:
+            if c.domain == "tradetron.tech":
+                return c.value          # highest priority — stop immediately
+            best = c.value             # fallback candidate
+    return best
+
+
 def _fresh_xsrf() -> str:
-    """URL-decode the XSRF-TOKEN cookie from the live jar (always current)."""
-    raw = session.cookies.get("XSRF-TOKEN", "")
+    """URL-decode the XSRF-TOKEN, always preferring domain=tradetron.tech."""
+    raw = _get_cookie("XSRF-TOKEN")
     return unquote(raw) if raw else unquote(xsrf)
+
+
+def _clear_domainless_cookies() -> None:
+    """
+    Remove cookies with empty/None domain that were loaded from the auth step.
+    After /set/cookie/IN the server re-issues them as domain=tradetron.tech.
+    The old domain-less ones are now stale duplicates that cause
+    requests.CookieConflictError on any .get("XSRF-TOKEN") call.
+    """
+    to_remove = [
+        (c.name, c.domain, c.path)
+        for c in session.cookies
+        if not c.domain
+    ]
+    for name, domain, path in to_remove:
+        session.cookies.clear(domain, path, name)
+    if to_remove:
+        removed = [n for n, _, _ in to_remove]
+        print(f"[Scraper] ✓ Cleared {len(to_remove)} domain-less duplicate(s): {removed}")
+
+
+def _dump_cookies(label: str) -> None:
+    print(f"[Scraper] [{label}] Cookie jar:")
+    for c in session.cookies:
+        print(f"  {c.name:<25} domain={c.domain!r:<20} path={c.path}  value={str(c.value)[:50]}")
 
 
 def _api_headers() -> dict:
     """
-    Headers for JSON API calls.
-    KEY: do NOT include Content-Type for GET requests — it causes Laravel to
-    treat the request as a fresh/anonymous context and ignore the session cookie.
+    Build headers for JSON API GET calls.
+    NOTE: No Content-Type — including it on GET requests causes Laravel to
+    treat the call as stateless/anonymous (fresh session → success=false).
     """
     return {
         "User-Agent":       UA,
@@ -81,59 +126,53 @@ def _api_headers() -> dict:
         "Referer":          f"{BASE_URL}/user/dashboard",
         "X-Requested-With": "XMLHttpRequest",
         "X-XSRF-TOKEN":     _fresh_xsrf(),
-        # NO Content-Type — critical for GET requests on Laravel
     }
-
-
-def _dump_cookies(label: str) -> None:
-    print(f"[Scraper] [{label}] Cookie jar:")
-    for c in session.cookies:
-        print(f"  {c.name:<25} domain={c.domain}  path={c.path}  value={str(c.value)[:60]}")
 
 
 # ── SELECT INDIA EXCHANGE ──────────────────────────────────────────────────────
 def select_india_exchange() -> None:
     """
-    Hits /set/cookie/IN — exactly what the browser does when the user clicks
-    the IND flag in the dropdown. Sets the exchange preference server-side.
-    After the redirect we re-fetch the dashboard so the session cookie is
-    re-issued with the exchange preference baked in.
+    Mimics clicking the IND flag dropdown item in the Tradetron header.
+    Sequence:
+      1. GET /set/cookie/IN  → server sets exchange preference + rotates cookies
+      2. _clear_domainless_cookies() → remove stale domain-less duplicates
+      3. Re-fetch /user/dashboard    → stabilise session with IN preference
     """
     url = f"{BASE_URL}/set/cookie/IN"
     print(f"\n[Scraper] ── Exchange Selection ───────────────────────────────")
     print(f"[Scraper] GET {url}")
 
+    nav_headers = {
+        "User-Agent": UA,
+        "Accept":     "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Referer":    f"{BASE_URL}/user/dashboard",
+    }
+
     try:
-        resp = session.get(
-            url,
-            headers={
-                "User-Agent": UA,
-                "Accept":     "text/html,application/xhtml+xml,*/*;q=0.8",
-                "Referer":    f"{BASE_URL}/user/dashboard",
-            },
-            allow_redirects=True,
-            timeout=30,
-        )
+        resp = session.get(url, headers=nav_headers, allow_redirects=True, timeout=30)
         print(f"[Scraper] Status: {resp.status_code} | Final URL: {resp.url}")
-        print(f"[Scraper] Set-Cookie in response: {'YES' if resp.headers.get('Set-Cookie') else 'NO'}")
+        print(f"[Scraper] Set-Cookie received: {'YES' if resp.headers.get('Set-Cookie') else 'NO'}")
 
         _dump_cookies("after /set/cookie/IN")
 
-        # Re-fetch dashboard so Laravel re-issues a stable session with IN preference
+        # ── KEY FIX: purge domain-less duplicates NOW, before any cookie reads ──
+        _clear_domainless_cookies()
+
+        _dump_cookies("after clearing domain-less duplicates")
+
+        # Re-fetch dashboard to stabilise the session with IN preference
         print(f"[Scraper] Re-fetching dashboard to stabilise session...")
         session.get(
             f"{BASE_URL}/user/dashboard",
-            headers={
-                "User-Agent": UA,
-                "Accept":     "text/html,application/xhtml+xml,*/*;q=0.8",
-                "Referer":    f"{BASE_URL}/set/cookie/IN",
-            },
+            headers={**nav_headers, "Referer": f"{BASE_URL}/set/cookie/IN"},
             allow_redirects=True,
             timeout=30,
         )
+
         _dump_cookies("after dashboard re-fetch")
 
-        print(f"[Scraper] country_code cookie = '{session.cookies.get('country_code', 'NOT SET')}'")
+        cc = _get_cookie("country_code")
+        print(f"[Scraper] country_code cookie = '{unquote(cc)[:30] if cc else 'NOT SET'}'")
         print(f"[Scraper] ✓ India (IND) exchange selected")
 
     except Exception as e:
@@ -144,7 +183,6 @@ def select_india_exchange() -> None:
 
 # ── SESSION HEALTH CHECK ───────────────────────────────────────────────────────
 def verify_session() -> None:
-    """Quick sanity check — make sure we're NOT on the login page."""
     print("[Scraper] Verifying session health...")
     try:
         resp = session.get(
@@ -159,18 +197,21 @@ def verify_session() -> None:
     except RuntimeError:
         raise
     except Exception as e:
-        print(f"[Scraper] ⚠ Session check failed: {e} — continuing")
+        print(f"[Scraper] ⚠ Session check exception: {e} — continuing")
 
 
 # ── SINGLE PAGE FETCH ──────────────────────────────────────────────────────────
 def _fetch_page(url: str) -> dict | None:
     hdrs = _api_headers()
-    print(f"[Scraper]   X-XSRF-TOKEN (sent): {hdrs['X-XSRF-TOKEN'][:40]}...")
+    print(f"[Scraper]   XSRF sent: {hdrs['X-XSRF-TOKEN'][:40]}...")
 
     try:
         resp = session.get(url, headers=hdrs, timeout=30)
         print(f"[Scraper]   HTTP {resp.status_code}")
-        print(f"[Scraper]   Set-Cookie in API response: {'YES — token rotated' if resp.headers.get('Set-Cookie') else 'no'}")
+
+        if resp.headers.get("Set-Cookie"):
+            print(f"[Scraper]   Set-Cookie in API response — clearing domain-less duplicates")
+            _clear_domainless_cookies()
 
         if resp.status_code == 401:
             print("[Scraper]   → 401 Unauthorized")
@@ -182,7 +223,7 @@ def _fetch_page(url: str) -> dict | None:
             return None
 
         if resp.status_code != 200:
-            print(f"[Scraper]   → HTTP {resp.status_code}")
+            print(f"[Scraper]   → Unexpected HTTP {resp.status_code}")
             return None
 
         data = resp.json()
@@ -209,27 +250,25 @@ def fetch_strategies() -> list:
 
     while page <= max_pages:
         url = f"{API_BASE_URL}?page={page}"
-        print(f"\n[Scraper] ── Page {page} ──────────────────────────────────────")
+        print(f"\n[Scraper] ── Page {page} {'─'*40}")
         print(f"[Scraper] GET {url}")
 
         data = _fetch_page(url)
 
         if data is None:
             if page == 1:
-                print("[Scraper] ── Full raw dump (page 1) ───────────────────────────")
+                print("[Scraper] ── Raw dump (page 1) ─────────────────────────────")
                 try:
                     resp = session.get(url, headers=_api_headers(), timeout=30)
-                    print(f"  Status   : {resp.status_code}")
-                    print(f"  CT       : {resp.headers.get('Content-Type', '')}")
+                    print(f"  Status    : {resp.status_code}")
+                    print(f"  CT        : {resp.headers.get('Content-Type', '')}")
                     print(f"  Set-Cookie: {resp.headers.get('Set-Cookie', '')[:200]}")
-                    print(f"  Body     : {resp.text[:600]}")
+                    print(f"  Body      : {resp.text[:600]}")
                 except Exception as ex:
-                    print(f"  Dump failed: {ex}")
-                print("[Scraper] ───────────────────────────────────────────────────────")
-                raise RuntimeError(
-                    "[Scraper] Failed to fetch page 1 — see dump above for diagnosis"
-                )
-            print(f"[Scraper] Failed on page {page} — stopping pagination")
+                    print(f"  Dump error: {ex}")
+                print("[Scraper] ─────────────────────────────────────────────────")
+                raise RuntimeError("[Scraper] Failed page 1 — see dump above")
+            print(f"[Scraper] Failed page {page} — stopping")
             break
 
         strategies = data.get("data", [])
@@ -239,16 +278,14 @@ def fetch_strategies() -> list:
 
         print(f"[Scraper] ✓ Page {page}: {len(strategies)} strategies")
 
-        # Duplicate guard
         existing_ids = {s.get("id") for s in all_strategies}
         new_ids      = {s.get("id") for s in strategies}
         if new_ids & existing_ids and page > 1:
-            print("[Scraper] Duplicate IDs — reached end of pagination")
+            print("[Scraper] Duplicate IDs — end of pagination")
             break
 
         all_strategies.extend(strategies)
 
-        # Pagination metadata
         meta         = data.get("meta") or data.get("pagination") or {}
         current_page = meta.get("current_page", page)
         last_page    = meta.get("last_page") or meta.get("total_pages")
@@ -297,10 +334,10 @@ def parse_strategy(s: dict) -> dict:
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
-# 1. Select India exchange
+# 1. Select India exchange + clear domain-less duplicate cookies
 select_india_exchange()
 
-# 2. Verify the session is alive post-exchange-selection
+# 2. Verify session is alive
 verify_session()
 
 # 3. Wait for server-side preference to propagate
@@ -310,12 +347,13 @@ time.sleep(5)
 # 4. Fetch strategies
 raw_strategies = fetch_strategies()
 
-# 5. Handle empty result
+# 5. Timestamps
 ist      = pytz.timezone("Asia/Kolkata")
 now_ist  = datetime.now(ist)
 ts_str   = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
 date_str = now_ist.strftime("%Y-%m-%d")
 
+# 6. Handle empty
 if not raw_strategies:
     print("[Scraper] ⚠ No strategies returned — writing empty CSV")
     pd.DataFrame(columns=[
@@ -326,18 +364,16 @@ if not raw_strategies:
     ]).to_csv(LATEST_CSV, index=False)
     sys.exit(0)
 
-# 6. Deduplicate
+# 7. Deduplicate + build DataFrame
 unique = {s["id"]: s for s in raw_strategies if s.get("id")}
 print(f"[Scraper] Removed {len(raw_strategies) - len(unique)} duplicates")
 
-# 7. Build DataFrame
 df = pd.DataFrame([parse_strategy(s) for s in unique.values()])
 df["Snapshot Time"] = ts_str
 df.sort_values("Strategy Name", inplace=True, ignore_index=True)
 
 # 8. Write CSVs
 EOD_MODE = os.environ.get("EOD_MODE", "false").strip().lower() == "true"
-
 df.to_csv(LATEST_CSV, index=False)
 
 if EOD_MODE:
