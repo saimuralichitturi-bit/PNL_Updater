@@ -37,8 +37,8 @@ from datetime import datetime
 import pytz
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-CLIENT_ID     = os.environ.get("AZURE_CLIENT_ID", "8c359df1-2487-4327-a61d-7a80ad091925")
-CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET")
+CLIENT_ID     = os.environ.get("MICROSOFT_CLIENT_ID", os.environ.get("AZURE_CLIENT_ID", "8c359df1-2487-4327-a61d-7a80ad091925"))
+CLIENT_SECRET = os.environ.get("MICROSOFT_CLIENT_SECRET", os.environ.get("AZURE_CLIENT_SECRET"))
 REFRESH_TOKEN = os.environ.get("AZURE_REFRESH_TOKEN")
 TENANT_ID     = "common"
 
@@ -266,10 +266,10 @@ def main():
 
     # Validate secrets
     if not CLIENT_SECRET:
-        print("[OneDrive] ✗ AZURE_CLIENT_SECRET not set")
+        print("[OneDrive] ✗ MICROSOFT_CLIENT_SECRET not set in GitHub Secrets")
         sys.exit(1)
     if not REFRESH_TOKEN:
-        print("[OneDrive] ✗ AZURE_REFRESH_TOKEN not set")
+        print("[OneDrive] ✗ AZURE_REFRESH_TOKEN not set in GitHub Secrets")
         sys.exit(1)
 
     # Step 1: Auth

@@ -121,9 +121,9 @@ jobs:
 
       - name: "Step 4 -- Update OneDrive Excel with PNL ROI data"
         env:
-          AZURE_CLIENT_ID:     ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_REFRESH_TOKEN: ${{ secrets.AZURE_REFRESH_TOKEN }}
+          MICROSOFT_CLIENT_ID:     ${{ secrets.MICROSOFT_CLIENT_ID }}
+          MICROSOFT_CLIENT_SECRET: ${{ secrets.MICROSOFT_CLIENT_SECRET }}
+          AZURE_REFRESH_TOKEN:     ${{ secrets.AZURE_REFRESH_TOKEN }}
         run: python onedrive_excel_updater.py
 
       - name: "Step 5 -- Generate strategy cards"

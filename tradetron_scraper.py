@@ -144,12 +144,11 @@ def fetch_strategy_capital(strategy_id: int) -> float:
 # ── Fetch strategies with pagination ──────────────────────────────────────────
 def fetch_strategies():
     all_strategies = []
-    page = 1
-    max_pages = 100
+    MAX_PAGES = 2  # Tradetron has exactly 2 pages of strategies
 
-    print(f"[Scraper] Starting pagination scan...")
+    print(f"[Scraper] Starting pagination scan (max {MAX_PAGES} pages)...")
 
-    while page <= max_pages:
+    for page in range(1, MAX_PAGES + 1):
         url = f"{API_BASE_URL}?page={page}"
         try:
             print(f"[Scraper] Page {page}: GET {url}")
@@ -184,7 +183,6 @@ def fetch_strategies():
             print(f"[Scraper] Error on page {page}: {e}")
             break
 
-        page += 1
         time.sleep(0.3)
 
     print(f"[Scraper] ✓ Total strategies fetched: {len(all_strategies)}")
