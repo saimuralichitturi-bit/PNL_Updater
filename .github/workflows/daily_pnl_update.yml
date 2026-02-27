@@ -20,6 +20,15 @@ on:
     # ── End-of-day (3:16 PM IST -> 09:46 UTC) ────────────────────────────────
     - cron: "46 9 * * 1-5"
   workflow_dispatch:
+    inputs:
+      force_eod:
+        description: 'Force EOD mode (updates Excel)'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 jobs:
   # ════════════════════════════════════════════════════════════════════════════
@@ -28,7 +37,9 @@ jobs:
   intraday-snapshot:
     name: "Intraday Snapshot (cards + Telegram)"
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && !startsWith(github.event.schedule, '46 9')) }}
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.force_eod == 'false' ||
+      github.event_name == 'schedule' && !startsWith(github.event.schedule, '46 9')
 
     steps:
       - name: Checkout repository
@@ -68,12 +79,14 @@ jobs:
         run: echo "Intraday snapshot complete -- $(date '+%Y-%m-%d %H:%M:%S UTC')"
 
   # ════════════════════════════════════════════════════════════════════════════
-  # JOB 2 — End-of-day
+  # JOB 2 — End-of-day (also triggered by workflow_dispatch with force_eod=true)
   # ════════════════════════════════════════════════════════════════════════════
   eod-pnl-update:
-    name: "EOD PNL Update (CSV + Drive + Telegram)"
+    name: "EOD PNL Update (CSV + Drive + Excel + Telegram)"
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'schedule' && startsWith(github.event.schedule, '46 9') }}
+    if: |
+      github.event_name == 'workflow_dispatch' && github.event.inputs.force_eod == 'true' ||
+      github.event_name == 'schedule' && startsWith(github.event.schedule, '46 9')
 
     steps:
       - name: Checkout repository
@@ -94,7 +107,7 @@ jobs:
           TRADETRON_PASSWORD: ${{ secrets.TRADETRON_PASSWORD }}
         run: python tradetron_auth.py
 
-      - name: "Step 2 -- Scrape strategies & PNL, save to CSV"
+      - name: "Step 2 -- Scrape strategies, PNL & Capital"
         env:
           TRADETRON_SESSION: ${{ steps.auth.outputs.session_json }}
           EOD_MODE: "true"
@@ -106,10 +119,17 @@ jobs:
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
         run: python google_drive_uploader.py
 
-      - name: "Step 4 -- Generate strategy cards"
+      - name: "Step 4 -- Update OneDrive Excel with PNL ROI data"
+        env:
+          AZURE_CLIENT_ID:     ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_REFRESH_TOKEN: ${{ secrets.AZURE_REFRESH_TOKEN }}
+        run: python onedrive_excel_updater.py
+
+      - name: "Step 5 -- Generate strategy cards"
         run: python tradetron_screenshots.py
 
-      - name: "Step 5 -- Send Telegram EOD PNL summary"
+      - name: "Step 6 -- Send Telegram EOD PNL summary"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS:  ${{ secrets.TELEGRAM_CHAT_IDS }}
