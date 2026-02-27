@@ -183,13 +183,13 @@ def compute_column_values(strategy_data: dict) -> dict:
             print(f"[OneDrive] ⚠️  Column '{col_name}' — missing strategies: {missing}")
 
         if total_capital > 0:
-            roi = total_pnl / total_capital
+            roi = round((total_pnl / total_capital) * 100, 1)  # e.g. 4.5 meaning 4.5%
         else:
             roi = 0.0
             print(f"[OneDrive] ⚠️  Column '{col_name}' — capital is 0, ROI set to 0")
 
         results[col_name] = roi
-        print(f"  {col_name:<16} sumPNL=₹{total_pnl:>12,.2f}  sumCap=₹{total_capital:>12,.0f}  ROI={roi:.6f} ({roi*100:.4f}%)")
+        print(f"  {col_name:<16} sumPNL=₹{total_pnl:>12,.2f}  sumCap=₹{total_capital:>12,.0f}  ROI={roi:.1f}%")
 
     return results
 
@@ -251,7 +251,7 @@ def write_excel_row(headers: dict, row_number: int, today_str: str, col_values: 
         print(f"[OneDrive]   Date: {today_str}")
         for i, col_name in enumerate(COLUMN_ORDER):
             val = col_values.get(col_name, 0.0)
-            print(f"  {col_name:<16} = {val:.6f} ({val*100:.4f}%)")
+            print(f"  {col_name:<16} = {val:.1f}%")
     else:
         print(f"[OneDrive] ✗ Write failed: {resp.status_code}")
         print(resp.json())
