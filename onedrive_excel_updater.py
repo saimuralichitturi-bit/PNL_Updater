@@ -1,3 +1,4 @@
+
 """
 onedrive_excel_updater.py
 ─────────────────────────
@@ -6,24 +7,27 @@ Uses refresh token for automatic authentication — NO manual login needed.
 
 Excel Column Mapping (A to Q):
   A  = Date
-  B  = DI3STS918 PDF   → DI3STS N 918 PDF                          (PNL/Capital)
-  C  = DI3STS PDF TBS  → avg(DI3STS N 1015 PDF, DI3STS N 1115 PDF) (sumPNL/sumCap)
-  D  = DI3STB918 PDF   → DI3STB 918 PDF                            (PNL/Capital)
-  E  = V3V2 S TBS      → avg(V3v2 S 1020, V3v2 S 1120)             (sumPNL/sumCap)
-  F  = V3V2 S          → V3v2 S                                     (PNL/Capital)
-  G  = IDNO TBS        → avg(IDNO10, IDNO10 1020, IDNO10 1120)      (sumPNL/sumCap)
-  H  = IDNO            → sum(IDNO10, IDNO10 1020, IDNO10 1120)      (sumPNL/sumCap)
-  I  = DI3STB          → DI3STB V1                                  (PNL/Capital)
-  J  = V3v2 N          → V3v2 N                                     (PNL/Capital)
-  K  = V3v2 N tbs      → avg(V3v2 N 1020, V3v2 N 1120, V3v2 N SF)  (sumPNL/sumCap)
-  L  = NDACS           → NDACS ATM ID                               (PNL/Capital)
-  M  = NDATC           → NDATC ATM ID                               (PNL/Capital)
-  N  = DI3STS          → DI3STS ATM ID                              (PNL/Capital)
-  O  = IDSO            → IDSO                                       (PNL/Capital)
-  P  = STOSS           → sum(STOSS N 5M, STOSS ND)                  (sumPNL/sumCap)
-  Q  = IDSO TBS        → avg(IDSO10 1020, IDSO10 1120)              (sumPNL/sumCap)
+  B  = DI3STS918 PDF   → DI3STS N 918 PDF                          (PNL/Capital = ROI)
+  C  = DI3STS PDF TBS  → avg(DI3STS N 1015 PDF, DI3STS N 1115 PDF) (avg of individual ROIs)
+  D  = DI3STB918 PDF   → DI3STB 918 PDF                            (PNL/Capital = ROI)
+  E  = V3V2 S TBS      → avg(V3v2 S 1020, V3v2 S 1120)             (avg of individual ROIs)
+  F  = V3V2 S          → V3v2 S                                     (PNL/Capital = ROI)
+  G  = IDNO TBS        → avg(IDNO10, IDNO10 1020, IDNO10 1120)      (avg of individual ROIs)
+  H  = IDNO            → sum(IDNO10, IDNO10 1020, IDNO10 1120)      (sumPNL / sumCap = Combined ROI)
+  I  = DI3STB          → DI3STB V1                                  (PNL/Capital = ROI)
+  J  = V3v2 N          → V3v2 N                                     (PNL/Capital = ROI)
+  K  = V3v2 N tbs      → avg(V3v2 N 1020, V3v2 N 1120, V3v2 N SF)  (avg of individual ROIs)
+  L  = NDACS           → NDACS ATM ID                               (PNL/Capital = ROI)
+  M  = NDATC           → NDATC ATM ID                               (PNL/Capital = ROI)
+  N  = DI3STS          → DI3STS ATM ID                              (PNL/Capital = ROI)
+  O  = IDSO            → IDSO                                       (PNL/Capital = ROI)
+  P  = STOSS           → sum(STOSS N 5M, STOSS ND)                  (sumPNL / sumCap = Combined ROI)
+  Q  = IDSO TBS        → avg(IDSO10 1020, IDSO10 1120)              (avg of individual ROIs)
 
-  Value = PNL (Overall) / Capital   (ROI ratio, e.g. 0.045 = 4.5%)
+Calculation methods:
+  ROI          = PNL (Overall) / Capital                  (single strategy)
+  Average ROI  = mean of individual strategy ROIs         (TBS columns: C, E, G, K, Q)
+  Combined ROI = sum(PNL) / sum(Capital) across group     (pooled columns: H, P)
 
 Reads:  pnl_latest.csv (written by tradetron_scraper.py)
 Writes: Appends/updates today's row in OneDrive Excel file
@@ -48,26 +52,30 @@ SHEET_NAME    = "Sheet1"
 PNL_CSV       = "pnl_latest.csv"
 IST           = pytz.timezone("Asia/Kolkata")
 
+# ── Calculation method constants ───────────────────────────────────────────────
+ROI      = "roi"        # single strategy: PNL / Capital
+AVG_ROI  = "avg_roi"    # average of individual strategy ROIs (TBS columns)
+COMB_ROI = "comb_roi"   # pooled: sumPNL / sumCapital (IDNO group, STOSS group)
+
 # ── Strategy → Excel column mapping ───────────────────────────────────────────
-# Each entry: "COLUMN_HEADER": [list of strategy names to include]
-# Value = sum(PNL of listed strategies) / sum(Capital of listed strategies)
+# Each entry: "COLUMN_HEADER": {"strategies": [...], "method": ROI|AVG_ROI|COMB_ROI}
 COLUMN_MAP = {
-    "DI3STS918 PDF":  ["DI3STS N 918 PDF"],
-    "DI3STS PDF TBS": ["DI3STS N 1015 PDF", "DI3STS N 1115 PDF"],
-    "DI3STB918 PDF":  ["DI3STB 918 PDF"],
-    "V3V2 S TBS":     ["V3v2 S 1020", "V3v2 S 1120"],
-    "V3V2 S":         ["V3v2 S"],
-    "IDNO TBS":       ["IDNO10", "IDNO10 1020", "IDNO10 1120"],
-    "IDNO":           ["IDNO10", "IDNO10 1020", "IDNO10 1120"],
-    "DI3STB":         ["DI3STB V1"],
-    "V3v2 N":         ["V3v2 N"],
-    "V3v2 N tbs":     ["V3v2 N 1020", "V3v2 N 1120", "V3v2 N SF"],
-    "NDACS":          ["NDACS ATM ID"],
-    "NDATC":          ["NDATC ATM ID"],
-    "DI3STS":         ["DI3STS ATM ID"],
-    "IDSO":           ["IDSO"],
-    "STOSS":          ["STOSS N 5M", "STOSS ND"],
-    "IDSO TBS":       ["IDSO10 1020", "IDSO10 1120"],
+    "DI3STS918 PDF":  {"strategies": ["DI3STS N 918 PDF"],                                        "method": ROI},
+    "DI3STS PDF TBS": {"strategies": ["DI3STS N 1015 PDF", "DI3STS N 1115 PDF"],                  "method": AVG_ROI},
+    "DI3STB918 PDF":  {"strategies": ["DI3STB 918 PDF"],                                          "method": ROI},
+    "V3V2 S TBS":     {"strategies": ["V3v2 S 1020", "V3v2 S 1120"],                              "method": AVG_ROI},
+    "V3V2 S":         {"strategies": ["V3v2 S"],                                                   "method": ROI},
+    "IDNO TBS":       {"strategies": ["IDNO10", "IDNO10 1020", "IDNO10 1120"],                    "method": AVG_ROI},
+    "IDNO":           {"strategies": ["IDNO10", "IDNO10 1020", "IDNO10 1120"],                    "method": COMB_ROI},
+    "DI3STB":         {"strategies": ["DI3STB V1"],                                               "method": ROI},
+    "V3v2 N":         {"strategies": ["V3v2 N"],                                                   "method": ROI},
+    "V3v2 N tbs":     {"strategies": ["V3v2 N 1020", "V3v2 N 1120", "V3v2 N SF"],                "method": AVG_ROI},
+    "NDACS":          {"strategies": ["NDACS ATM ID"],                                             "method": ROI},
+    "NDATC":          {"strategies": ["NDATC ATM ID"],                                             "method": ROI},
+    "DI3STS":         {"strategies": ["DI3STS ATM ID"],                                           "method": ROI},
+    "IDSO":           {"strategies": ["IDSO"],                                                     "method": ROI},
+    "STOSS":          {"strategies": ["STOSS N 5M", "STOSS ND"],                                  "method": COMB_ROI},
+    "IDSO TBS":       {"strategies": ["IDSO10 1020", "IDSO10 1120"],                              "method": AVG_ROI},
 }
 
 # Column order matching Excel A→Q (A=Date, then B→Q)
@@ -160,21 +168,24 @@ def read_pnl_csv() -> dict:
 # ── Compute column values ──────────────────────────────────────────────────────
 def compute_column_values(strategy_data: dict) -> dict:
     """
-    For each Excel column, compute: sum(PNL) / sum(Capital)
-    Returns dict: { column_name: roi_value }
+    Compute ROI for each Excel column using the correct formula method:
+
+      ROI       (single)  : PNL / Capital  × 100
+      AVG_ROI   (TBS)     : mean of each strategy's individual ROI  × 100
+      COMB_ROI  (pooled)  : sumPNL / sumCapital  × 100
+
+    Returns dict: { column_name: roi_value_percent }
     """
     results = {}
 
-    for col_name, strategy_names in COLUMN_MAP.items():
-        total_pnl     = 0.0
-        total_capital = 0.0
-        found         = []
-        missing       = []
+    for col_name, cfg in COLUMN_MAP.items():
+        strategy_names = cfg["strategies"]
+        method         = cfg["method"]
 
+        found   = []
+        missing = []
         for sname in strategy_names:
             if sname in strategy_data:
-                total_pnl     += strategy_data[sname]["pnl"]
-                total_capital += strategy_data[sname]["capital"]
                 found.append(sname)
             else:
                 missing.append(sname)
@@ -182,14 +193,44 @@ def compute_column_values(strategy_data: dict) -> dict:
         if missing:
             print(f"[OneDrive] ⚠️  Column '{col_name}' — missing strategies: {missing}")
 
-        if total_capital > 0:
-            roi = round((total_pnl / total_capital) * 100, 1)  # e.g. 4.5 meaning 4.5%
+        if not found:
+            results[col_name] = 0.0
+            print(f"  {col_name:<16} NO DATA  ROI=0.0%")
+            continue
+
+        # ── ROI: single strategy (or first-found if only one expected) ─────────
+        if method == ROI:
+            s = found[0]
+            pnl = strategy_data[s]["pnl"]
+            cap = strategy_data[s]["capital"]
+            roi = round((pnl / cap) * 100, 1) if cap > 0 else 0.0
+            print(f"  {col_name:<16} [{s}] PNL=₹{pnl:>10,.2f}  Cap=₹{cap:>10,.0f}  ROI={roi:.1f}%")
+
+        # ── AVG_ROI: average of each strategy's individual ROI ────────────────
+        elif method == AVG_ROI:
+            individual_rois = []
+            for s in found:
+                pnl = strategy_data[s]["pnl"]
+                cap = strategy_data[s]["capital"]
+                if cap > 0:
+                    individual_rois.append((pnl / cap) * 100)
+                else:
+                    print(f"[OneDrive] ⚠️  '{s}' has capital=0, excluded from avg")
+            roi = round(sum(individual_rois) / len(individual_rois), 1) if individual_rois else 0.0
+            roi_parts = ", ".join(f"{r:.1f}%" for r in individual_rois)
+            print(f"  {col_name:<16} avg({roi_parts}) = {roi:.1f}%")
+
+        # ── COMB_ROI: pool all PNL and capital, then divide ───────────────────
+        elif method == COMB_ROI:
+            total_pnl = sum(strategy_data[s]["pnl"]     for s in found)
+            total_cap = sum(strategy_data[s]["capital"]  for s in found)
+            roi = round((total_pnl / total_cap) * 100, 1) if total_cap > 0 else 0.0
+            print(f"  {col_name:<16} sumPNL=₹{total_pnl:>10,.2f}  sumCap=₹{total_cap:>10,.0f}  ROI={roi:.1f}%")
+
         else:
             roi = 0.0
-            print(f"[OneDrive] ⚠️  Column '{col_name}' — capital is 0, ROI set to 0")
 
         results[col_name] = roi
-        print(f"  {col_name:<16} sumPNL=₹{total_pnl:>12,.2f}  sumCap=₹{total_capital:>12,.0f}  ROI={roi:.1f}%")
 
     return results
 
@@ -236,7 +277,7 @@ def write_excel_row(headers: dict, row_number: int, today_str: str, col_values: 
         row_data.append(col_values.get(col_name, 0.0))
 
     # Range: A{row}:Q{row} (17 columns: A + 16 data columns)
-    end_col   = chr(ord("A") + len(row_data) - 1)  # "Q"
+    end_col    = chr(ord("A") + len(row_data) - 1)  # "Q"
     range_addr = f"A{row_number}:{end_col}{row_number}"
 
     url = (
@@ -250,8 +291,9 @@ def write_excel_row(headers: dict, row_number: int, today_str: str, col_values: 
         print(f"[OneDrive] ✓ Row {row_number} written — range {range_addr}")
         print(f"[OneDrive]   Date: {today_str}")
         for i, col_name in enumerate(COLUMN_ORDER):
-            val = col_values.get(col_name, 0.0)
-            print(f"  {col_name:<16} = {val:.1f}%")
+            val    = col_values.get(col_name, 0.0)
+            method = COLUMN_MAP[col_name]["method"]
+            print(f"  {col_name:<16} = {val:.1f}%  [{method}]")
     else:
         print(f"[OneDrive] ✗ Write failed: {resp.status_code}")
         print(resp.json())
