@@ -99,46 +99,120 @@ def parse_capital_str(capital_str: str) -> float:
         return 0.0
 
 
-def fetch_strategy_capital(strategy_id: int) -> float:
+def parse_counter_option(opt_text: str):
     """
-    Fetch the capital for a single strategy from its detail page HTML.
-    Looks for: <p>Capital:&nbsp;<span class="currency-symbol">₹ </span><span>28.00 L</span></p>
+    Parse a run_counter <option> label like '87 (₹  52,919)' or '65 (₹  -174,281)'.
+    Returns (counter: int, pnl: float) or (None, None) on failure.
     """
-    url = f"{BASE_URL}/strategy/deployed/{strategy_id}"
+    try:
+        parts = opt_text.split("(", 1)
+        counter = int(parts[0].strip())
+        if len(parts) > 1:
+            pnl_str = parts[1].rstrip(")")
+            # Strip currency symbol, spaces, commas — keep digits, dot, minus
+            pnl_str = re.sub(r"[₹\s,]", "", pnl_str)
+            pnl = float(pnl_str)
+        else:
+            pnl = None
+        return counter, pnl
+    except Exception:
+        return None, None
+
+
+def fetch_strategy_html_data(strategy_id: int) -> dict:
+    """
+    Fetch the strategy deployed page HTML and extract:
+      - capital        : float (raw rupees)
+      - latest_counter : int   (first/highest run counter from dropdown)
+      - counter_pnl    : float (PNL shown for that counter in the dropdown label)
+
+    After identifying the latest counter, re-fetches the page with
+    ?run_counter=<value> so the response reflects the latest run's data.
+    """
+    url      = f"{BASE_URL}/strategy/deployed/{strategy_id}"
+    result   = {"capital": 0.0, "latest_counter": None, "counter_pnl": None}
+
     try:
         resp = session.get(url, headers=HTML_HEADERS, timeout=20)
         if resp.status_code != 200:
-            print(f"[Scraper] Capital fetch failed for {strategy_id}: HTTP {resp.status_code}")
-            return 0.0
+            print(f"[Scraper] HTML fetch failed for {strategy_id}: HTTP {resp.status_code}")
+            return result
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Find <p> containing "Capital"
+        # ── Capital ──────────────────────────────────────────────────────────
         for p in soup.find_all("p"):
             text = p.get_text(separator=" ", strip=True)
             if "Capital" in text:
-                # Get all spans, last one has the value like "28.00 L"
                 spans = p.find_all("span")
                 for span in spans:
                     span_text = span.get_text(strip=True)
-                    # Skip currency symbol span
                     if "₹" in span_text or span_text == "":
                         continue
-                    capital = parse_capital_str(span_text)
-                    if capital > 0:
-                        return capital
+                    cap = parse_capital_str(span_text)
+                    if cap > 0:
+                        result["capital"] = cap
+                        break
+                if result["capital"] > 0:
+                    break
 
-        # Fallback: regex search in raw HTML
-        match = re.search(r"Capital[^<]*<[^>]+>[^<]*<\/[^>]+><span[^>]*>([\d.,]+\s*(?:L|Cr|K)?)<\/span>", resp.text)
-        if match:
-            return parse_capital_str(match.group(1))
+        # Fallback: regex in raw HTML
+        if result["capital"] == 0:
+            m = re.search(
+                r"Capital[^<]*<[^>]+>[^<]*<\/[^>]+><span[^>]*>([\d.,]+\s*(?:L|Cr|K)?)<\/span>",
+                resp.text,
+            )
+            if m:
+                result["capital"] = parse_capital_str(m.group(1))
 
-        print(f"[Scraper] Capital not found in HTML for strategy {strategy_id}")
-        return 0.0
+        # ── Run Counter dropdown ─────────────────────────────────────────────
+        # id pattern: run_counter_<strategy_id>  (e.g. run_counter_25764945)
+        select = soup.find("select", id=re.compile(r"^run_counter_"))
+        if not select:
+            select = soup.find("select", {"name": "run_counter"})
+
+        if select:
+            options = select.find_all("option")
+            for opt in options:
+                val = opt.get("value", "")
+                if not val or val == "All":
+                    continue
+                counter, pnl = parse_counter_option(opt.get_text(strip=True))
+                if counter is not None:
+                    result["latest_counter"] = counter
+                    result["counter_pnl"]    = pnl
+                    print(f"[Scraper]   id={strategy_id} → latest counter={counter}, counter PNL={pnl}")
+                    break  # first numeric option = latest
+        else:
+            print(f"[Scraper]   id={strategy_id}: run_counter select not found in HTML")
+
+        # ── Re-fetch with the latest counter to load run-specific data ───────
+        if result["latest_counter"] is not None:
+            counter_url = f"{url}?run_counter={result['latest_counter']}"
+            try:
+                cr = session.get(counter_url, headers=HTML_HEADERS, timeout=20)
+                if cr.status_code == 200:
+                    # Capital re-parse from run-specific view (may be same, just being thorough)
+                    cr_soup = BeautifulSoup(cr.text, "html.parser")
+                    for p in cr_soup.find_all("p"):
+                        text = p.get_text(separator=" ", strip=True)
+                        if "Capital" in text:
+                            for span in p.find_all("span"):
+                                span_text = span.get_text(strip=True)
+                                if "₹" in span_text or span_text == "":
+                                    continue
+                                cap = parse_capital_str(span_text)
+                                if cap > 0 and result["capital"] == 0:
+                                    result["capital"] = cap
+                                    break
+                            break
+            except Exception as ce:
+                print(f"[Scraper]   Counter re-fetch error for {strategy_id}: {ce}")
 
     except Exception as e:
-        print(f"[Scraper] Capital fetch error for {strategy_id}: {e}")
-        return 0.0
+        print(f"[Scraper] HTML data fetch error for {strategy_id}: {e}")
+
+    return result
 
 
 # ── Fetch strategies with pagination ──────────────────────────────────────────
@@ -239,7 +313,8 @@ if not raw_strategies:
         "Strategy ID", "Strategy Name", "Status", "Deployment Type", "Exchange",
         "Broker", "Capital Required", "Capital (HTML)", "PNL (Last Run)",
         "PNL (Overall)", "PNL (Live/Open)", "Run Counter", "Completed Runs",
-        "Currency", "Deployment Date", "Creator", "Snapshot Time",
+        "Currency", "Deployment Date", "Creator",
+        "Latest Counter", "Counter PNL", "Snapshot Time",
     ])
     empty_df.to_csv(LATEST_CSV, index=False)
     sys.exit(0)
@@ -255,13 +330,20 @@ print(f"[Scraper] Removed {len(raw_strategies) - len(unique_strategies)} duplica
 rows = [parse_strategy(s) for s in unique_strategies.values()]
 df = pd.DataFrame(rows)
 
-# ── Scrape capital from HTML for each strategy ─────────────────────────────────
-print(f"\n[Scraper] Fetching capital from HTML for {len(df)} strategies...")
-html_capitals = []
+# ── Scrape capital + latest run counter from HTML for each strategy ────────────
+print(f"\n[Scraper] Fetching capital & latest run counter from HTML for {len(df)} strategies...")
+html_capitals    = []
+latest_counters  = []
+counter_pnls     = []
+
 for _, row in df.iterrows():
     sid  = row["Strategy ID"]
     name = row["Strategy Name"]
-    cap  = fetch_strategy_capital(int(sid))
+    data = fetch_strategy_html_data(int(sid))
+
+    cap     = data["capital"]
+    counter = data["latest_counter"]
+    cpnl    = data["counter_pnl"]
 
     # Fallback to API capital if HTML scrape returns 0
     if cap == 0 and row["Capital Required"] > 0:
@@ -271,9 +353,13 @@ for _, row in df.iterrows():
         print(f"[Scraper]   {name}: ₹{cap:,.0f}")
 
     html_capitals.append(cap)
+    latest_counters.append(counter)
+    counter_pnls.append(cpnl)
     time.sleep(0.5)  # be polite
 
-df["Capital (HTML)"] = html_capitals
+df["Capital (HTML)"]  = html_capitals
+df["Latest Counter"]  = latest_counters
+df["Counter PNL"]     = counter_pnls
 
 # Use HTML capital as primary, fallback to API capital
 df["Capital"] = df.apply(
@@ -311,6 +397,7 @@ total_capital = df["Capital"].sum()
 print(f"\n[Scraper] Preview:")
 preview_df = df[[
     "Strategy Name", "Status", "Capital",
+    "Latest Counter", "Counter PNL",
     "PNL (Last Run)", "PNL (Overall)", "PNL (Live/Open)"
 ]].head(10)
 print(preview_df.to_string())

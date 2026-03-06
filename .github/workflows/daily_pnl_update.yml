@@ -66,7 +66,7 @@ jobs:
           EOD_MODE: "false"
         run: python tradetron_scraper.py
 
-      - name: "Step 3 -- Generate strategy cards"
+      - name: "Step 3 -- Generate PNL table"
         run: python tradetron_screenshots.py
 
       - name: "Step 4 -- Send Telegram PNL snapshot"
@@ -126,7 +126,7 @@ jobs:
           AZURE_REFRESH_TOKEN:     ${{ secrets.AZURE_REFRESH_TOKEN }}
         run: python onedrive_excel_updater.py
 
-      - name: "Step 5 -- Generate strategy cards"
+      - name: "Step 5 -- Generate PNL table"
         run: python tradetron_screenshots.py
 
       - name: "Step 6 -- Send Telegram EOD PNL summary"
